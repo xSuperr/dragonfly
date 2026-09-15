@@ -58,6 +58,11 @@ type Server struct {
 	// p holds a map of all players currently connected to the server. When they
 	// leave, they are removed from the map.
 	p map[uuid.UUID]*onlinePlayer
+	// parked holds players whose Conn closed but whose entity remains in the
+	// world awaiting Rebind.
+	parkMu                                sync.Mutex
+	parked                                map[uuid.UUID]*parkState
+	parkTotal, rebindTotal, parkTTLExpire atomic.Uint64
 	// pwg is a sync.WaitGroup used to wait for all players to be disconnected
 	// before server shutdown, so that their data is saved properly.
 	pwg sync.WaitGroup
@@ -321,6 +326,7 @@ func (srv *Server) Close() error {
 // close stops the server, storing player and world data to disk.
 func (srv *Server) close() {
 	srv.conf.Log.Info("Server closing...")
+	srv.cancelAllParks()
 
 	srv.conf.Log.Debug("Disconnecting players...")
 	for p := range srv.Players(nil) {
@@ -460,6 +466,10 @@ func (srv *Server) wait() {
 // channel.
 func (srv *Server) finaliseConn(ctx context.Context, conn session.Conn, l Listener) {
 	id := uuid.MustParse(conn.IdentityData().Identity)
+	if srv.Parked(id) {
+		srv.rebindParked(ctx, conn, l, id)
+		return
+	}
 	data := srv.defaultGameData()
 
 	d, w, err := srv.conf.PlayerProvider.Load(id, srv.dimension)
@@ -541,6 +551,7 @@ func (srv *Server) dimension(dimension world.Dimension) *world.World {
 // handleSessionClose handles the closing of a session. It removes the player
 // of the session from the server.
 func (srv *Server) handleSessionClose(tx *world.Tx, c session.Controllable) {
+	srv.unpark(c.UUID())
 	srv.pmu.Lock()
 	_, ok := srv.p[c.UUID()]
 	delete(srv.p, c.UUID())
@@ -574,6 +585,7 @@ func (srv *Server) createPlayer(id uuid.UUID, conn session.Conn, conf player.Con
 		JoinMessage:    srv.conf.JoinMessage,
 		QuitMessage:    srv.conf.QuitMessage,
 		HandleStop:     srv.handleSessionClose,
+		HandlePark:     srv.handlePark,
 		BlockRegistry:  w.BlockRegistry(),
 	}.New(conn)
 

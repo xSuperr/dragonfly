@@ -107,6 +107,12 @@ type Session struct {
 	closeBackground chan struct{}
 
 	br world.BlockRegistry
+
+	// parked is set when the network Conn is dropped but the player stays in
+	// the world awaiting Rebind (DWS Phase 3). handlePackets must not take the
+	// stock quit path while this is true.
+	parked atomic.Bool
+	loopWG sync.WaitGroup
 }
 
 // debugShapeUpdate represents a pending debug shape mutation. If shape is nil, the update removes the
@@ -169,6 +175,10 @@ type Config struct {
 	// nil if the Controllable could not be restored to any world, such as when
 	// both its current world and respawn destination closed during teardown.
 	HandleStop func(*world.Tx, Controllable)
+	// HandlePark is called after the Session parks: the Conn is closed and the
+	// player remains in the world. It must not block on the session's world
+	// owner. Nil means park is still recorded on the Session but nobody tracks TTL.
+	HandlePark func(s *Session, reason string, ttl time.Duration)
 	// BlockRegistry overrides the registry used for network serialization. If nil, world.DefaultBlockRegistry is used.
 	BlockRegistry world.BlockRegistry
 }
@@ -223,23 +233,31 @@ func (conf Config) New(conn Conn) *Session {
 	}
 
 	s.registerHandlers()
+	s.sendJoinPackets()
+	s.loopWG.Add(1)
+	go s.writeLoop(conn)
+	return s
+}
+
+func (s *Session) writeLoop(conn Conn) {
+	defer s.loopWG.Done()
+	for {
+		select {
+		case <-s.closeBackground:
+			return
+		case pk := <-s.packets:
+			_ = conn.WritePacket(pk)
+		}
+	}
+}
+
+func (s *Session) sendJoinPackets() {
 	s.sendBiomes()
 	groups, items := creativeContent(s.br)
 	s.writePacket(&packet.CreativeContent{Groups: groups, Items: items})
 	s.sendRecipes()
 	s.sendArmourTrimData()
 	s.SendSpeed(0.1)
-	go func() {
-		for {
-			select {
-			case <-s.closeBackground:
-				return
-			case pk := <-s.packets:
-				_ = conn.WritePacket(pk)
-			}
-		}
-	}()
-	return s
 }
 
 // SetHandle sets the world.EntityHandle of the Session and attaches a skin to
@@ -256,13 +274,25 @@ func (s *Session) SetHandle(handle *world.EntityHandle, skin skin.Skin) {
 // Spawn makes the Controllable passed spawn in the world.World.
 // The function passed will be called when the session stops running.
 func (s *Session) Spawn(c Controllable, tx *world.Tx) {
+	s.spawn(c, tx, true)
+}
+
+func (s *Session) spawn(c Controllable, tx *world.Tx, announceJoin bool) {
+	if s.parked.Load() {
+		return
+	}
+
 	s.SendHealth(c.Health(), c.MaxHealth(), c.Absorption())
 	s.SendExperience(c.ExperienceLevel(), c.ExperienceProgress())
 	s.SendFood(c.Food(), 0, 0)
 
 	pos := c.Position()
+	if s.chunkLoader != nil {
+		s.chunkLoader.Close(tx)
+	}
 	s.chunkLoader = world.NewLoader(int(s.chunkRadius), tx.World(), s)
 	s.chunkLoader.Move(tx, pos)
+	s.lastChunkPos = world.ChunkPos{1 << 30, 1 << 30}
 	s.writePacket(&packet.NetworkChunkPublisherUpdate{
 		Position: protocol.BlockPos{int32(pos[0]), int32(pos[1]), int32(pos[2])},
 		Radius:   uint32(s.chunkRadius) << 4,
@@ -282,10 +312,11 @@ func (s *Session) Spawn(c Controllable, tx *world.Tx) {
 	s.sendInv(s.armour.Inventory(), protocol.WindowIDArmour)
 
 	chat.Global.Subscribe(c)
-	if !s.conf.JoinMessage.Zero() {
+	if announceJoin && !s.conf.JoinMessage.Zero() {
 		chat.Global.Writet(s.conf.JoinMessage, s.conn.IdentityData().DisplayName)
 	}
 
+	s.loopWG.Add(2)
 	go s.background()
 	go s.handlePackets()
 }
@@ -312,14 +343,21 @@ func (s *Session) close(tx *world.Tx, c Controllable) {
 		_ = s.viewLayer.Close()
 	}
 
-	s.conf.HandleStop(tx, c)
+	if s.conf.HandleStop != nil {
+		s.conf.HandleStop(tx, c)
+	}
 
-	// Clear the inventories so that they no longer hold references to the connection.
-	_ = s.inv.Close()
-	_ = s.offHand.Close()
-	_ = s.armour.Close()
+	if s.inv != nil {
+		_ = s.inv.Close()
+	}
+	if s.offHand != nil {
+		_ = s.offHand.Close()
+	}
+	if s.armour != nil {
+		_ = s.armour.Close()
+	}
 
-	if tx != nil {
+	if tx != nil && s.chunkLoader != nil {
 		s.chunkLoader.Close(tx)
 	}
 
@@ -387,7 +425,11 @@ func (s *Session) ClientData() login.ClientData {
 // handlePackets continuously handles incoming packets from the connection. It processes them accordingly.
 // Once the connection is closed, handlePackets will return.
 func (s *Session) handlePackets() {
+	defer s.loopWG.Done()
 	defer func() {
+		if s.parked.Load() {
+			return
+		}
 		// First close the Controllable. This might lead to a world change
 		// (player might be dead while disconnecting, in which case it will
 		// respawn first).
@@ -409,6 +451,7 @@ func (s *Session) handlePackets() {
 	for {
 		pk, err := s.conn.ReadPacket()
 		if err != nil {
+			s.maybeParkOnDisconnect()
 			return
 		}
 		err = s.withControllable(context.Background(), func(tx *world.Tx, c Controllable) error {
@@ -427,6 +470,7 @@ func (s *Session) handlePackets() {
 // background performs background tasks of the Session. This includes chunk sending and automatic command updating.
 // background returns when the Session's connection is closed using CloseConnection.
 func (s *Session) background() {
+	defer s.loopWG.Done()
 	var (
 		r          map[string]map[int]cmd.Runnable
 		enums      map[string]cmd.Enum

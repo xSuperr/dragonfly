@@ -3329,6 +3329,25 @@ func (p *Player) Disconnect(msg ...any) {
 	})
 }
 
+// Park closes the network Conn, keeps this Player in the world, suppresses the
+// quit message, and starts a park TTL on the Server. The Bedrock client is
+// gone; Rebind attaches a new Conn later.
+func (p *Player) Park(reason string, ttl time.Duration) {
+	if s := p.s; s != nil {
+		s.Park(reason, ttl)
+	}
+}
+
+// Rebind attaches a new session.Conn to a parked player. The caller must have
+// already run StartGameContext on conn. The same Player object is kept; a
+// second join message is not sent.
+func (p *Player) Rebind(conn session.Conn) error {
+	if p.s == nil {
+		return errors.New("player: rebind: no session")
+	}
+	return p.s.Rebind(conn, p, p.tx)
+}
+
 // Close closes the player and removes it from the world.
 // Close disconnects the player with a 'Connection closed.' message. Disconnect should be used to disconnect a
 // player with a custom message.

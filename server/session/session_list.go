@@ -34,6 +34,17 @@ func (l *sessionList) Add(s *Session) {
 	l.s = append(l.s, s)
 }
 
+// ResendTo sends the player list of every session to s. Used after Rebind so a
+// new client sees everyone who was already online.
+func (l *sessionList) ResendTo(s *Session) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	for _, other := range l.s {
+		l.sendSessionTo(other, s)
+	}
+}
+
 func (l *sessionList) Remove(s *Session, entity world.Entity) {
 	l.mu.Lock()
 	removedFrom := slices.Clone(l.s)

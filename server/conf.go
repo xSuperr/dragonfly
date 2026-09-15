@@ -121,6 +121,11 @@ type Config struct {
 	// chunks in each world, defaulting to 1. Values above 1 generate chunks
 	// concurrently and require a concurrency-safe Generator.
 	ChunkLoadWorkers int
+	// DefaultParkTTL is how long a parked player remains in the world after
+	// their Conn closes before the stock save+remove path runs. Zero means
+	// 5 minutes. A negative duration disables TTL expiry (Server.Close still
+	// disconnects parked players).
+	DefaultParkTTL time.Duration
 	// Entities is a world.EntityRegistry with all entity types registered that
 	// may be added to the Server's worlds. If no entity types are registered,
 	// Entities will be set to entity.DefaultRegistry.
@@ -189,6 +194,7 @@ func (conf Config) New() *Server {
 		conf:     conf,
 		incoming: make(chan incoming),
 		p:        make(map[uuid.UUID]*onlinePlayer),
+		parked:   make(map[uuid.UUID]*parkState),
 		world:    &world.World{}, nether: &world.World{}, end: &world.World{},
 	}
 	for _, lf := range conf.Listeners {
