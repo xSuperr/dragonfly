@@ -113,6 +113,9 @@ type Session struct {
 	// stock quit path while this is true.
 	parked atomic.Bool
 	loopWG sync.WaitGroup
+
+	list *List
+	chat *chat.Chat
 }
 
 // debugShapeUpdate represents a pending debug shape mutation. If shape is nil, the update removes the
@@ -181,6 +184,14 @@ type Config struct {
 	HandlePark func(s *Session, reason string, ttl time.Duration)
 	// BlockRegistry overrides the registry used for network serialization. If nil, world.DefaultBlockRegistry is used.
 	BlockRegistry world.BlockRegistry
+	// List is the PlayerList namespace. Nil uses a process-wide list. Each
+	// Server should pass its own List so in-process World Servers do not mix
+	// PlayerList packets.
+	List *List
+	// Chat is the chat players Subscribe to. Nil uses chat.Global. Each Server
+	// should pass its own Chat so in-process World Servers do not fan out
+	// messages across leftover subscribers.
+	Chat *chat.Chat
 }
 
 func (conf Config) New(conn Conn) *Session {
@@ -216,6 +227,14 @@ func (conf Config) New(conn Conn) *Session {
 		hiddenHud:              make(map[hud.Element]struct{}),
 		debugShapes:            make(map[int]debug.Shape),
 		debugShapeUpdates:      make([]debugShapeUpdate, 0, 256),
+		list:                   conf.List,
+		chat:                   conf.Chat,
+	}
+	if s.list == nil {
+		s.list = processSessions
+	}
+	if s.chat == nil {
+		s.chat = chat.Global
 	}
 	s.viewLayer = world.NewViewLayer(s)
 	s.openedWindow.Store(inventory.New(1, nil))
@@ -239,6 +258,14 @@ func (conf Config) New(conn Conn) *Session {
 	return s
 }
 
+// Chat is the chat this session's player is subscribed to.
+func (s *Session) Chat() *chat.Chat {
+	if s == nil || s == Nop || s.chat == nil {
+		return chat.Global
+	}
+	return s.chat
+}
+
 func (s *Session) writeLoop(conn Conn) {
 	defer s.loopWG.Done()
 	for {
@@ -253,7 +280,7 @@ func (s *Session) writeLoop(conn Conn) {
 
 func (s *Session) sendJoinPackets() {
 	s.sendBiomes()
-	groups, items := creativeContent(s.br)
+	groups, items := cachedCreativeContent(s.br)
 	s.writePacket(&packet.CreativeContent{Groups: groups, Items: items})
 	s.sendRecipes()
 	s.sendArmourTrimData()
@@ -268,7 +295,7 @@ func (s *Session) SetHandle(handle *world.EntityHandle, skin skin.Skin) {
 	s.entities[selfEntityRuntimeID] = handle
 
 	s.joinSkin = skin
-	sessions.Add(s)
+	s.list.Add(s)
 }
 
 // Spawn makes the Controllable passed spawn in the world.World.
@@ -311,9 +338,9 @@ func (s *Session) spawn(c Controllable, tx *world.Tx, announceJoin bool) {
 	s.sendInv(s.offHand, protocol.WindowIDOffHand)
 	s.sendInv(s.armour.Inventory(), protocol.WindowIDArmour)
 
-	chat.Global.Subscribe(c)
+	s.chat.Subscribe(c)
 	if announceJoin && !s.conf.JoinMessage.Zero() {
-		chat.Global.Writet(s.conf.JoinMessage, s.conn.IdentityData().DisplayName)
+		s.chat.Writet(s.conf.JoinMessage, s.conn.IdentityData().DisplayName)
 	}
 
 	s.loopWG.Add(2)
@@ -362,9 +389,9 @@ func (s *Session) close(tx *world.Tx, c Controllable) {
 	}
 
 	if !s.conf.QuitMessage.Zero() {
-		chat.Global.Writet(s.conf.QuitMessage, s.conn.IdentityData().DisplayName)
+		s.chat.Writet(s.conf.QuitMessage, s.conn.IdentityData().DisplayName)
 	}
-	chat.Global.Unsubscribe(c)
+	s.chat.Unsubscribe(c)
 
 	// Note: Be aware of where RemoveEntity is called. This must not be done too
 	// early.
@@ -375,7 +402,7 @@ func (s *Session) close(tx *world.Tx, c Controllable) {
 
 	// This should always be called last due to the timing of the removal of
 	// entity runtime IDs.
-	sessions.Remove(s, c)
+	s.list.Remove(s, c)
 	s.entityMutex.Lock()
 	clear(s.entityRuntimeIDs)
 	clear(s.entities)

@@ -322,15 +322,15 @@ func (p *Player) RemoveBossBar() {
 	p.session().RemoveBossBar()
 }
 
-// Chat writes a message in the global chat (chat.Global). The message is prefixed with the name of the
-// player and is formatted following the rules of fmt.Sprintln.
+// Chat writes a message to this player's server chat. The message is prefixed
+// with the name of the player and is formatted following the rules of fmt.Sprintln.
 func (p *Player) Chat(msg ...any) {
 	message := format(msg)
 	ctx := NewEventContext(p.tx, p)
 	if p.Handler().HandleChat(ctx, &message); ctx.Cancelled() {
 		return
 	}
-	_, _ = fmt.Fprintf(chat.Global, "<%v> %v\n", p.Name(), message)
+	_, _ = fmt.Fprintf(p.session().Chat(), "<%v> %v\n", p.Name(), message)
 }
 
 // ExecuteCommand executes a command passed as the player. If the command could not be found, or if the usage

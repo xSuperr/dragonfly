@@ -8,6 +8,8 @@ import (
 	"math"
 	"net"
 	"slices"
+	"strings"
+	"sync"
 	"time"
 	_ "unsafe" // Imported for compiler directives.
 
@@ -112,6 +114,59 @@ func (s *Session) sendBiomes() {
 
 // sendRecipes sends the current crafting recipes to the session.
 func (s *Session) sendRecipes() {
+	recipes := recipe.Recipes()
+	for index, i := range recipes {
+		s.recipes[uint32(index)+1] = i
+	}
+	s.writePacket(cachedCraftingData(s.br, recipes))
+}
+
+var (
+	craftingDataMu      sync.Mutex
+	craftingDataCache   *packet.CraftingData
+	craftingDataCacheBR world.BlockRegistry
+)
+
+func cachedCraftingData(br world.BlockRegistry, recipes []recipe.Recipe) *packet.CraftingData {
+	craftingDataMu.Lock()
+	defer craftingDataMu.Unlock()
+	if craftingDataCache != nil && craftingDataCacheBR == br {
+		return craftingDataCache
+	}
+	craftingDataCache = buildCraftingData(br, recipes)
+	craftingDataCacheBR = br
+	return craftingDataCache
+}
+
+var (
+	creativeMu      sync.Mutex
+	creativeCacheBR world.BlockRegistry
+	creativeGroups  []protocol.CreativeGroup
+	creativeItems   []protocol.CreativeItem
+)
+
+func cachedCreativeContent(br world.BlockRegistry) ([]protocol.CreativeGroup, []protocol.CreativeItem) {
+	creativeMu.Lock()
+	defer creativeMu.Unlock()
+	if creativeGroups != nil && creativeCacheBR == br {
+		return creativeGroups, creativeItems
+	}
+	creativeGroups, creativeItems = creativeContent(br)
+	creativeCacheBR = br
+	return creativeGroups, creativeItems
+}
+
+// WarmJoinPackets builds CreativeContent and CraftingData once so the first
+// session.New does not hold Server.createPlayer (and pwg) while encoding.
+func WarmJoinPackets(br world.BlockRegistry) {
+	if br == nil {
+		br = world.DefaultBlockRegistry
+	}
+	cachedCreativeContent(br)
+	cachedCraftingData(br, recipe.Recipes())
+}
+
+func buildCraftingData(br world.BlockRegistry, recipes []recipe.Recipe) *packet.CraftingData {
 	var (
 		shapedRecipes            []protocol.ShapedRecipe
 		shapelessRecipes         []protocol.ShapelessRecipe
@@ -123,17 +178,15 @@ func (s *Session) sendRecipes() {
 		potionContainerChange    []protocol.PotionContainerChangeRecipe
 	)
 
-	for index, i := range recipe.Recipes() {
+	for index, i := range recipes {
 		networkID := uint32(index) + 1
-		s.recipes[networkID] = i
-
 		switch i := i.(type) {
 		case recipe.Shapeless:
 			shapelessRecipes = append(shapelessRecipes, protocol.ShapelessRecipe{
 				RecipeID:        uuid.New().String(),
 				Priority:        int32(i.Priority()),
-				Input:           stacksToIngredientItems(s.br, i.Input()),
-				Output:          stacksToRecipeStacks(s.br, i.Output()),
+				Input:           stacksToIngredientItems(br, i.Input()),
+				Output:          stacksToRecipeStacks(br, i.Output()),
 				Block:           i.Block(),
 				RecipeNetworkID: networkID,
 			})
@@ -141,8 +194,8 @@ func (s *Session) sendRecipes() {
 			userDataShapelessRecipes = append(userDataShapelessRecipes, protocol.UserDataShapelessRecipe{ShapelessRecipe: protocol.ShapelessRecipe{
 				RecipeID:        uuid.New().String(),
 				Priority:        int32(i.Priority()),
-				Input:           stacksToIngredientItems(s.br, i.Input()),
-				Output:          stacksToRecipeStacks(s.br, i.Output()),
+				Input:           stacksToIngredientItems(br, i.Input()),
+				Output:          stacksToRecipeStacks(br, i.Output()),
 				Block:           i.Block(),
 				RecipeNetworkID: networkID,
 			}})
@@ -157,14 +210,14 @@ func (s *Session) sendRecipes() {
 				Priority:        int32(i.Priority()),
 				Width:           int32(i.Shape().Width()),
 				Height:          int32(i.Shape().Height()),
-				Input:           stacksToIngredientItems(s.br, i.Input()),
-				Output:          stacksToRecipeStacks(s.br, i.Output()),
+				Input:           stacksToIngredientItems(br, i.Input()),
+				Output:          stacksToRecipeStacks(br, i.Output()),
 				Block:           i.Block(),
 				AssumeSymmetry:  true,
 				RecipeNetworkID: networkID,
 			})
 		case recipe.SmithingTransform:
-			input, output := stacksToIngredientItems(s.br, i.Input()), stacksToRecipeStacks(s.br, i.Output())
+			input, output := stacksToIngredientItems(br, i.Input()), stacksToRecipeStacks(br, i.Output())
 			smithingTransformRecipes = append(smithingTransformRecipes, protocol.SmithingTransformRecipe{
 				RecipeID:        uuid.New().String(),
 				Base:            input[0],
@@ -175,7 +228,7 @@ func (s *Session) sendRecipes() {
 				RecipeNetworkID: networkID,
 			})
 		case recipe.SmithingTrim:
-			input := stacksToIngredientItems(s.br, i.Input())
+			input := stacksToIngredientItems(br, i.Input())
 			smithingTrimRecipes = append(smithingTrimRecipes, protocol.SmithingTrimRecipe{
 				RecipeID:        uuid.New().String(),
 				Base:            input[0],
@@ -210,7 +263,7 @@ func (s *Session) sendRecipes() {
 			})
 		}
 	}
-	s.writePacket(&packet.CraftingData{
+	return &packet.CraftingData{
 		ShapedRecipes:                shapedRecipes,
 		ShapelessRecipes:             shapelessRecipes,
 		MultiRecipes:                 multiRecipes,
@@ -220,7 +273,7 @@ func (s *Session) sendRecipes() {
 		PotionRecipes:                potionRecipes,
 		PotionContainerChangeRecipes: potionContainerChange,
 		ClearRecipes:                 true,
-	})
+	}
 }
 
 // sendArmourTrimData sends the armour trim data.
@@ -1077,7 +1130,7 @@ func stacksToIngredientItems(_ world.BlockRegistry, inputs []recipe.Item) []prot
 				meta = math.MaxInt16 // Used to indicate that the item has multiple selectable variants.
 			}
 			d = &protocol.DefaultItemDescriptor{
-				Name:          name,
+				Name:          strings.Clone(name),
 				MetadataValue: int32(meta),
 			}
 		case recipe.ItemTag:

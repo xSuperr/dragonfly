@@ -12,31 +12,43 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 )
 
-var sessions = new(sessionList)
+// processSessions is used only when Config.List is nil (sessions created
+// outside Server). Each Server owns a List so in-process World Servers do not
+// mix PlayerList/skins.
+var processSessions = NewList()
 
-type sessionList struct {
+// List is the PlayerList namespace for one Server.
+type List struct {
 	mu sync.Mutex
 	s  []*Session
 }
 
-func (l *sessionList) Add(s *Session) {
+// NewList returns an empty PlayerList namespace.
+func NewList() *List {
+	return &List{}
+}
+
+func (l *List) Add(s *Session) {
+	if l == nil || s == nil {
+		return
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	for _, other := range l.s {
-		// Show all sessions to the new session and the new session to all
-		// existing sessions.
 		l.sendSessionTo(s, other)
 		l.sendSessionTo(other, s)
 	}
-	// Show the new session to itself.
 	l.sendSessionTo(s, s)
 	l.s = append(l.s, s)
 }
 
 // ResendTo sends the player list of every session to s. Used after Rebind so a
 // new client sees everyone who was already online.
-func (l *sessionList) ResendTo(s *Session) {
+func (l *List) ResendTo(s *Session) {
+	if l == nil || s == nil {
+		return
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -45,7 +57,10 @@ func (l *sessionList) ResendTo(s *Session) {
 	}
 }
 
-func (l *sessionList) Remove(s *Session, entity world.Entity) {
+func (l *List) Remove(s *Session, entity world.Entity) {
+	if l == nil || s == nil {
+		return
+	}
 	l.mu.Lock()
 	removedFrom := slices.Clone(l.s)
 	for _, other := range l.s {
@@ -58,25 +73,31 @@ func (l *sessionList) Remove(s *Session, entity world.Entity) {
 		return
 	}
 	for _, other := range removedFrom {
-		if other.viewLayer != nil {
+		if other != nil && other.viewLayer != nil {
 			other.viewLayer.Remove(entity)
 		}
 	}
 }
 
-func (l *sessionList) Lookup(id uuid.UUID) (*Session, bool) {
+func (l *List) Lookup(id uuid.UUID) (*Session, bool) {
+	if l == nil {
+		return nil, false
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	if index := slices.IndexFunc(l.s, func(session *Session) bool {
-		return session.ent.UUID() == id
+		return session != nil && session.ent != nil && session.ent.UUID() == id
 	}); index != -1 {
 		return l.s[index], true
 	}
 	return nil, false
 }
 
-func (l *sessionList) sendSessionTo(s, to *Session) {
+func (l *List) sendSessionTo(s, to *Session) {
+	if s == nil || to == nil || s.ent == nil || to.entityRuntimeIDs == nil || to.Parked() {
+		return
+	}
 	runtimeID := uint64(selfEntityRuntimeID)
 
 	to.entityMutex.Lock()
@@ -101,7 +122,10 @@ func (l *sessionList) sendSessionTo(s, to *Session) {
 	})
 }
 
-func (l *sessionList) unsendSessionFrom(s, from *Session) {
+func (l *List) unsendSessionFrom(s, from *Session) {
+	if s == nil || from == nil || s.ent == nil || from.entityRuntimeIDs == nil {
+		return
+	}
 	from.entityMutex.Lock()
 	delete(from.entities, from.entityRuntimeIDs[s.ent])
 	delete(from.entityRuntimeIDs, s.ent)
