@@ -109,7 +109,7 @@ func (s *Session) Rebind(conn Conn, c Controllable, tx *world.Tx) error {
 	s.chunkRadius = int32(r)
 
 	s.resetEntityViews()
-	sessions.ResendTo(s)
+	s.list.ResendTo(s)
 
 	s.parked.Store(false)
 	s.loopWG.Add(1)

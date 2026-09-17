@@ -79,7 +79,7 @@ func (s *Session) ViewEntity(e world.Entity) {
 	id := e.H().Type().EncodeEntity()
 	switch v := e.(type) {
 	case Controllable:
-		_, actualPlayer := sessions.Lookup(v.UUID())
+		_, actualPlayer := s.list.Lookup(v.UUID())
 		if !actualPlayer {
 			s.writePacket(&packet.PlayerList{Entries: []protocol.PlayerListEntry{{
 				ActionType:     protocol.PlayerListActionAdd,

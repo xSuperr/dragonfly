@@ -62,6 +62,8 @@ type Server struct {
 	// world awaiting Rebind.
 	parkMu                                sync.Mutex
 	parked                                map[uuid.UUID]*parkState
+	sessions                              *session.List
+	chat                                  *chat.Chat
 	parkTotal, rebindTotal, parkTTLExpire atomic.Uint64
 	// pwg is a sync.WaitGroup used to wait for all players to be disconnected
 	// before server shutdown, so that their data is saved properly.
@@ -334,6 +336,10 @@ func (srv *Server) close() {
 	}
 	srv.pwg.Wait()
 
+	if srv.chat != nil {
+		_ = srv.chat.Close()
+	}
+
 	srv.conf.Log.Debug("Closing player provider...")
 	if err := srv.conf.PlayerProvider.Close(); err != nil {
 		srv.conf.Log.Error("Close player provider: " + err.Error())
@@ -576,8 +582,6 @@ func (srv *Server) handleSessionClose(tx *world.Tx, c session.Controllable) {
 // createPlayer creates a new player instance using the UUID and connection
 // passed.
 func (srv *Server) createPlayer(id uuid.UUID, conn session.Conn, conf player.Config, w *world.World) incoming {
-	srv.pwg.Add(1)
-
 	s := session.Config{
 		Log:            srv.conf.Log,
 		MaxChunkRadius: srv.conf.MaxChunkRadius,
@@ -587,7 +591,10 @@ func (srv *Server) createPlayer(id uuid.UUID, conn session.Conn, conf player.Con
 		HandleStop:     srv.handleSessionClose,
 		HandlePark:     srv.handlePark,
 		BlockRegistry:  w.BlockRegistry(),
+		List:           srv.sessions,
+		Chat:           srv.chat,
 	}.New(conn)
+	srv.pwg.Add(1)
 
 	conf.Name = conn.IdentityData().DisplayName
 	conf.XUID = conn.IdentityData().XUID

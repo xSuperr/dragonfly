@@ -15,6 +15,7 @@ import (
 	"github.com/df-mc/dragonfly/server/player"
 	"github.com/df-mc/dragonfly/server/player/chat"
 	"github.com/df-mc/dragonfly/server/player/playerdb"
+	"github.com/df-mc/dragonfly/server/session"
 	"github.com/df-mc/dragonfly/server/world"
 	"github.com/df-mc/dragonfly/server/world/biome"
 	"github.com/df-mc/dragonfly/server/world/generator"
@@ -195,6 +196,8 @@ func (conf Config) New() *Server {
 		incoming: make(chan incoming),
 		p:        make(map[uuid.UUID]*onlinePlayer),
 		parked:   make(map[uuid.UUID]*parkState),
+		sessions: session.NewList(),
+		chat:     chat.New(),
 		world:    &world.World{}, nether: &world.World{}, end: &world.World{},
 	}
 	for _, lf := range conf.Listeners {
@@ -212,6 +215,7 @@ func (conf Config) New() *Server {
 	srv.world = srv.createWorld(world.Overworld, &srv.nether, &srv.end)
 	srv.nether = srv.createWorld(world.Nether, &srv.world, &srv.end)
 	srv.end = srv.createWorld(world.End, &srv.nether, &srv.world)
+	session.WarmJoinPackets(srv.world.BlockRegistry())
 
 	return srv
 }
