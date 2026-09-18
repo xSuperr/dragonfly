@@ -284,6 +284,9 @@ type stubConn struct {
 	inbound    chan packet.Packet
 	startGames atomic.Int32
 	autoPark   bool
+
+	mu      sync.Mutex
+	written []packet.Packet
 }
 
 func newStubConn(name string, id uuid.UUID, autoPark bool) *stubConn {
@@ -313,7 +316,12 @@ func (c *stubConn) ChunkRadius() int                 { return 8 }
 func (c *stubConn) Latency() time.Duration           { return 0 }
 func (c *stubConn) Flush() error                     { return nil }
 func (c *stubConn) RemoteAddr() net.Addr             { return c.addr }
-func (c *stubConn) WritePacket(packet.Packet) error  { return nil }
+func (c *stubConn) WritePacket(pk packet.Packet) error {
+	c.mu.Lock()
+	c.written = append(c.written, pk)
+	c.mu.Unlock()
+	return nil
+}
 func (c *stubConn) StartGameContext(context.Context, minecraft.GameData) error {
 	c.startGames.Add(1)
 	return nil

@@ -3349,6 +3349,23 @@ func (p *Player) Rebind(conn session.Conn) error {
 	return p.s.Rebind(conn, p, p.tx)
 }
 
+// ReleaseForMigration removes this player from the world without writing a
+// vanilla Disconnect packet and without closing the network Conn. Dest
+// ImportSession must not overlap a live source UUID. The Player Server still
+// owns the Bedrock session and later detaches the source stream.
+func (p *Player) ReleaseForMigration() {
+	p.once.Do(func() {
+		p.h.HandleQuit(p)
+		p.h = NopHandler{}
+		if s := p.s; s != nil {
+			s.Close(p.tx, p)
+			return
+		}
+		p.tx.RemoveEntity(p)
+		_ = p.handle.Close()
+	})
+}
+
 // Close closes the player and removes it from the world.
 // Close disconnects the player with a 'Connection closed.' message. Disconnect should be used to disconnect a
 // player with a custom message.

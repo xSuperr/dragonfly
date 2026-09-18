@@ -156,6 +156,17 @@ func (l *Loader) Chunk(pos ChunkPos) (*Column, bool) {
 	return c, ok
 }
 
+// LoadedPositions returns the chunk positions currently loaded for this viewer.
+func (l *Loader) LoadedPositions() []ChunkPos {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make([]ChunkPos, 0, len(l.loaded))
+	for pos := range l.loaded {
+		out = append(out, pos)
+	}
+	return out
+}
+
 // Close closes the loader. It unloads all chunks currently loaded for the viewer, and hides all entities that
 // are currently shown to it.
 func (l *Loader) Close(tx *Tx) {

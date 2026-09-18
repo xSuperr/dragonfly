@@ -586,6 +586,10 @@ func (srv *Server) handleSessionClose(tx *world.Tx, c session.Controllable) {
 // createPlayer creates a new player instance using the UUID and connection
 // passed.
 func (srv *Server) createPlayer(id uuid.UUID, conn session.Conn, conf player.Config, w *world.World) incoming {
+	return srv.newIncoming(id, conn, conf, w, false)
+}
+
+func (srv *Server) newIncoming(id uuid.UUID, conn session.Conn, conf player.Config, w *world.World, imported bool) incoming {
 	s := session.Config{
 		Log:            srv.conf.Log,
 		MaxChunkRadius: srv.conf.MaxChunkRadius,
@@ -597,6 +601,7 @@ func (srv *Server) createPlayer(id uuid.UUID, conn session.Conn, conf player.Con
 		BlockRegistry:  w.BlockRegistry(),
 		List:           srv.sessions,
 		Chat:           srv.chat,
+		Imported:       imported,
 	}.New(conn)
 	srv.pwg.Add(1)
 

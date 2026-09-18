@@ -116,6 +116,13 @@ type Session struct {
 
 	list *List
 	chat *chat.Chat
+
+	// reservedRuntimeIDs maps entity UUID to the runtime ID the already-spawned
+	// client knows (DWS ImportSession). Consumed on the first ViewEntity.
+	reservedRuntimeIDs map[uuid.UUID]uint64
+	// knownChunks are chunk positions the client already has. The first
+	// ViewChunk for each is skipped so import does not resend LevelChunk.
+	knownChunks map[world.ChunkPos]struct{}
 }
 
 // debugShapeUpdate represents a pending debug shape mutation. If shape is nil, the update removes the
@@ -192,6 +199,11 @@ type Config struct {
 	// should pass its own Chat so in-process World Servers do not fan out
 	// messages across leftover subscribers.
 	Chat *chat.Chat
+	// Imported is true when the Conn is already spawned on the Bedrock client
+	// (DWS Phase 4 ImportSession). Join packets that belong to first-join
+	// (CreativeContent, recipes, biomes) are skipped; spawn still resyncs
+	// inventory/health and continues packet I/O.
+	Imported bool
 }
 
 func (conf Config) New(conn Conn) *Session {
@@ -252,7 +264,9 @@ func (conf Config) New(conn Conn) *Session {
 	}
 
 	s.registerHandlers()
-	s.sendJoinPackets()
+	if !conf.Imported {
+		s.sendJoinPackets()
+	}
 	s.loopWG.Add(1)
 	go s.writeLoop(conn)
 	return s
