@@ -170,7 +170,8 @@ func (srv *Server) ImportSession(conn session.Conn, snap SessionSnapshot) error 
 // so dest ImportSession cannot overlap a live source UUID. It does not Park,
 // does not write a vanilla Disconnect packet, and leaves the Conn open so the
 // Player Server can still abort-before-commit (before this call) or detach
-// after dest import. After this returns, Player(id) is false.
+// after dest import. After this returns, Player(id) and Parked(id) are false;
+// a later Conn close must not Park the UUID back.
 func (srv *Server) ReleaseSession(id uuid.UUID) error {
 	h, ok := srv.Player(id)
 	if !ok {

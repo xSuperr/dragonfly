@@ -112,6 +112,9 @@ type Session struct {
 	// the world awaiting Rebind (DWS Phase 3). handlePackets must not take the
 	// stock quit path while this is true.
 	parked atomic.Bool
+	// closed is set when Close has started. ReleaseSession uses Close; a later
+	// ReadPacket error must not Park the UUID back into the server.
+	closed atomic.Bool
 	loopWG sync.WaitGroup
 
 	list *List
@@ -376,6 +379,7 @@ func (s *Session) Close(tx *world.Tx, c Controllable) {
 // close closes the session, which in turn closes the controllable and the connection that the session
 // manages.
 func (s *Session) close(tx *world.Tx, c Controllable) {
+	s.closed.Store(true)
 	if tx != nil {
 		c.MoveItemsToInventory()
 		s.closeCurrentContainer(tx, false)

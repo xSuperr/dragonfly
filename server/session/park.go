@@ -54,7 +54,7 @@ func (s *Session) enterPark(reason string, ttl time.Duration) {
 }
 
 func (s *Session) maybeParkOnDisconnect() {
-	if s.parked.Load() {
+	if s.parked.Load() || s.closed.Load() {
 		return
 	}
 	h, ok := s.conn.(ParkHint)

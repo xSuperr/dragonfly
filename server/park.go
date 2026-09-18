@@ -69,6 +69,11 @@ func (srv *Server) handlePark(s *session.Session, reason string, ttl time.Durati
 	if id == uuid.Nil {
 		return
 	}
+	if _, ok := srv.Player(id); !ok {
+		// ReleaseSession already dropped the UUID. Parking it back would be
+		// dual authority with dest ImportSession.
+		return
+	}
 	ttl = srv.resolveParkTTL(ttl)
 	ctx, cancel := context.WithCancel(context.Background())
 	st := &parkState{sess: s, reason: reason, cancel: cancel}
