@@ -1,6 +1,10 @@
 package playerdb
 
 import (
+	"encoding/json"
+	"fmt"
+	"time"
+
 	"github.com/df-mc/dragonfly/server/block/cube"
 	"github.com/df-mc/dragonfly/server/item"
 	"github.com/df-mc/dragonfly/server/item/inventory"
@@ -8,7 +12,6 @@ import (
 	"github.com/df-mc/dragonfly/server/world"
 	"github.com/go-gl/mathgl/mgl64"
 	"github.com/google/uuid"
-	"time"
 )
 
 func (p *Provider) fromJson(d jsonData, lookupWorld func(world.Dimension) *world.World) (player.Config, *world.World) {
@@ -63,6 +66,7 @@ func (p *Provider) toJson(d player.Config, w *world.World) jsonData {
 	offHand, _ := d.OffHand.Item(0)
 	return jsonData{
 		UUID:            d.UUID.String(),
+		XUID:            d.XUID,
 		Username:        d.Name,
 		Position:        d.Position,
 		Velocity:        d.Velocity,
@@ -140,4 +144,27 @@ type jsonEffect struct {
 	Ambient         bool
 	ParticlesHidden bool
 	Infinite        bool
+}
+
+// MarshalConfig encodes player.Config to a serialisable JSON DTO. Live
+// inventory pointers, Session, Skin, and Locale are not included: inventories
+// are NBT, and identity/skin are restored from the destination Conn.
+func MarshalConfig(d player.Config, w *world.World) ([]byte, error) {
+	if w == nil {
+		return nil, fmt.Errorf("playerdb: marshal config: nil world")
+	}
+	return json.Marshal((&Provider{}).toJson(d, w))
+}
+
+// UnmarshalConfig decodes a MarshalConfig DTO into a fresh player.Config.
+func UnmarshalConfig(b []byte, lookupWorld func(world.Dimension) *world.World) (player.Config, *world.World, error) {
+	if lookupWorld == nil {
+		return player.Config{}, nil, fmt.Errorf("playerdb: unmarshal config: nil world lookup")
+	}
+	var d jsonData
+	if err := json.Unmarshal(b, &d); err != nil {
+		return player.Config{}, nil, err
+	}
+	conf, w := (&Provider{}).fromJson(d, lookupWorld)
+	return conf, w, nil
 }
