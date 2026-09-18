@@ -137,6 +137,31 @@ func TestReleaseSessionThenImportHasNoOverlap(t *testing.T) {
 	}
 }
 
+func TestReleaseSessionThenConnCloseDoesNotPark(t *testing.T) {
+	src, ln := startParkTestServer(t)
+	id := uuid.MustParse("99999999-9999-9999-9999-999999999999")
+	first := newStubConn("ReleaseParkBot", id, true)
+	ln.push(first)
+	waitSpawned(t, src, id)
+	if err := src.ReleaseSession(id); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	_ = first.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if src.Parked(id) {
+			t.Fatal("Conn close after ReleaseSession must not Park")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, ok := src.Player(id); ok {
+		t.Fatal("source still has uuid after release+close")
+	}
+	if src.Parked(id) {
+		t.Fatal("release must not Park after Conn close")
+	}
+}
+
 func TestImportSessionRejectsDuplicateUUID(t *testing.T) {
 	srv, ln := startParkTestServer(t)
 	id := uuid.MustParse("77777777-7777-7777-7777-777777777777")
