@@ -127,20 +127,21 @@ func (s *Session) ViewEntity(e world.Entity) {
 	case *entity.Ent:
 		switch e.H().Type() {
 		case entity.ItemType:
-			s.writePacket(&packet.AddItemActor{
-				EntityUniqueID:  int64(runtimeID),
-				EntityRuntimeID: runtimeID,
-				Item:            instanceFromItem(s.br, v.Behaviour().(*entity.ItemBehaviour).Item()),
-				Position:        vec64To32(v.Position()),
-				Velocity:        vec64To32(v.Velocity()),
-				EntityMetadata:  metadata,
-			})
+			s.addItemActor(e, runtimeID, metadata, v.Behaviour().(*entity.ItemBehaviour).Item(), v.Velocity())
 			return
 		case entity.TextType:
 			metadata[protocol.EntityDataKeyVariant] = int32(s.br.BlockRuntimeID(block.Air{}))
 		case entity.FallingBlockType:
 			metadata[protocol.EntityDataKeyVariant] = int32(s.br.BlockRuntimeID(v.Behaviour().(*entity.FallingBlockBehaviour).Block()))
 		}
+	}
+	if stack, ok := itemStackEntity(e); ok {
+		var velocity mgl64.Vec3
+		if moving, ok := e.(interface{ Velocity() mgl64.Vec3 }); ok {
+			velocity = moving.Velocity()
+		}
+		s.addItemActor(e, runtimeID, metadata, stack, velocity)
+		return
 	}
 	if v, ok := e.H().Type().(NetworkEncodeableEntity); ok {
 		id = v.NetworkEncodeEntity()
@@ -149,6 +150,9 @@ func (s *Session) ViewEntity(e world.Entity) {
 	var vel mgl64.Vec3
 	if v, ok := e.(interface{ Velocity() mgl64.Vec3 }); ok {
 		vel = v.Velocity()
+	}
+	if e.H().TickDisabled() {
+		vel = mgl64.Vec3{}
 	}
 
 	s.writePacket(&packet.AddActor{
@@ -226,6 +230,11 @@ func (s *Session) viewEntityAbsoluteMovement(id uint64, e world.Entity, pos mgl6
 	if authoritative {
 		flags |= packet.MoveFlagTeleport
 	}
+	// Pose-driven entities must force the client transform; otherwise Bedrock
+	// keeps simulating gravity/AI between sparse replay samples.
+	if e != nil && e.H() != nil && e.H().TickDisabled() {
+		flags |= packet.MoveFlagTeleport | packet.MoveFlagForceMove
+	}
 	s.writePacket(&packet.MoveActorAbsolute{
 		EntityRuntimeID: id,
 		Position:        vec64To32(pos.Add(entityOffset(e))),
@@ -239,10 +248,40 @@ func (s *Session) ViewEntityVelocity(e world.Entity, velocity mgl64.Vec3) {
 	if s.entityHidden(e) {
 		return
 	}
+	if e != nil && e.H() != nil && e.H().TickDisabled() {
+		velocity = mgl64.Vec3{}
+	}
 	s.writePacket(&packet.SetActorMotion{
 		EntityRuntimeID: s.entityRuntimeID(e),
 		Velocity:        vec64To32(velocity),
 	})
+}
+
+func (s *Session) addItemActor(e world.Entity, runtimeID uint64, metadata protocol.EntityMetadata, stack item.Stack, velocity mgl64.Vec3) {
+	if e != nil && e.H() != nil && e.H().TickDisabled() {
+		metadata.UnsetFlag(protocol.EntityDataKeyFlags, protocol.EntityDataFlagHasGravity)
+		metadata.UnsetFlag(protocol.EntityDataKeyFlags, protocol.EntityDataFlagClimb)
+		metadata.SetFlag(protocol.EntityDataKeyFlags, protocol.EntityDataFlagNoAI)
+		velocity = mgl64.Vec3{}
+	}
+	s.writePacket(&packet.AddItemActor{
+		EntityUniqueID:  int64(runtimeID),
+		EntityRuntimeID: runtimeID,
+		Item:            instanceFromItem(s.br, stack),
+		Position:        vec64To32(e.Position()),
+		Velocity:        vec64To32(velocity),
+		EntityMetadata:  metadata,
+	})
+}
+
+func itemStackEntity(e world.Entity) (item.Stack, bool) {
+	if e == nil {
+		return item.Stack{}, false
+	}
+	if carrier, ok := e.(interface{ Item() item.Stack }); ok {
+		return carrier.Item(), true
+	}
+	return item.Stack{}, false
 }
 
 // entityOffset returns the offset that entities have client-side.

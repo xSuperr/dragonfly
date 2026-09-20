@@ -38,6 +38,7 @@ type Controllable interface {
 
 	SetHeldItems(right, left item.Stack)
 	SetHeldSlot(slot int) error
+	StopUsingItem()
 
 	Move(deltaPos mgl64.Vec3, deltaYaw, deltaPitch float64)
 

@@ -57,7 +57,10 @@ func (l *Loader) ChangeWorld(tx *Tx, new *World) {
 	clear(l.loaded)
 	clear(l.pending)
 	l.w.viewerMu.Lock()
-	delete(l.w.viewers, l)
+	if _, ok := l.w.viewers[l]; ok {
+		delete(l.w.viewers, l)
+		l.w.heartbeatViewers.Add(-1)
+	}
 	l.w.viewerMu.Unlock()
 
 	l.world(new)
@@ -180,7 +183,10 @@ func (l *Loader) Close(tx *Tx) {
 	clear(l.pending)
 
 	l.w.viewerMu.Lock()
-	delete(l.w.viewers, l)
+	if _, ok := l.w.viewers[l]; ok {
+		delete(l.w.viewers, l)
+		l.w.heartbeatViewers.Add(-1)
+	}
 	l.w.viewerMu.Unlock()
 
 	l.closed = true

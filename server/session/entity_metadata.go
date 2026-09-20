@@ -30,6 +30,13 @@ func (s *Session) parseEntityMetadata(e world.Entity) protocol.EntityMetadata {
 
 	m.SetFlag(protocol.EntityDataKeyFlags, protocol.EntityDataFlagHasGravity)
 	m.SetFlag(protocol.EntityDataKeyFlags, protocol.EntityDataFlagClimb)
+	if e.H().TickDisabled() {
+		// Presentation entities (replay playback) are pose-driven. Keep the
+		// client from simulating gravity/climbing between authoritative moves.
+		m.UnsetFlag(protocol.EntityDataKeyFlags, protocol.EntityDataFlagHasGravity)
+		m.UnsetFlag(protocol.EntityDataKeyFlags, protocol.EntityDataFlagClimb)
+		m.SetFlag(protocol.EntityDataKeyFlags, protocol.EntityDataFlagNoAI)
+	}
 	if g, ok := e.H().Type().(glint); ok && g.Glint() {
 		m.SetFlag(protocol.EntityDataKeyFlags, protocol.EntityDataFlagEnchanted)
 	}

@@ -44,9 +44,10 @@ func (h *ItemStackRequestHandler) handleEnchant(a *protocol.CraftRecipeStackRequ
 		return fmt.Errorf("can't enchant non-enchantable item")
 	}
 
-	// Use the slot plus one as the cost. The requirement and enchantments can be found in the results from
-	// determineAvailableEnchantments using the same slot index.
-	cost := int(a.RecipeNetworkID + 1)
+	// Keep the displayed enchantment requirement separate from the deducted
+	// cost: a max-power (level 30) option costs only its table level, 1, 2, or 3.
+	// The requirement and enchantments come from the same option index.
+	cost := int(a.RecipeNetworkID) + 1
 	requirement := allCosts[a.RecipeNetworkID]
 	enchants := allEnchants[a.RecipeNetworkID]
 
@@ -147,11 +148,15 @@ func (s *Session) determineAvailableEnchantments(tx *world.Tx, c Controllable, p
 		return nil, nil
 	}
 
-	// Search for bookshelves around the enchanting table. Bookshelves help boost the value of the enchantments that
-	// are selected, resulting in enchantments that are rarer but also more expensive.
+	// Search for bookshelves around the enchanting table. Worlds may override
+	// this power without placing physical bookshelves.
 	seed := uint64(c.EnchantmentSeed())
 	random := rand.New(rand.NewPCG(seed, seed))
 	bookshelves := searchBookshelves(tx, pos)
+	powerOverride := tx.World().EnchantingTablePower()
+	if powerOverride > bookshelves {
+		bookshelves = powerOverride
+	}
 	value := enchantable.EnchantmentValue()
 
 	// Calculate the base cost, used to calculate the upper, middle, and lower level costs.
@@ -162,16 +167,22 @@ func (s *Session) determineAvailableEnchantments(tx *world.Tx, c Controllable, p
 	middleLevelCost := baseCost*2/3 + 1
 	lowerLevelCost := max(baseCost, bookshelves*2)
 
-	// Create a list of available enchantments for each slot.
-	return []int{
-			upperLevelCost,
-			middleLevelCost,
-			lowerLevelCost,
-		}, [][]item.Enchantment{
-			createEnchantments(random, stack, value, upperLevelCost),
-			createEnchantments(random, stack, value, middleLevelCost),
-			createEnchantments(random, stack, value, lowerLevelCost),
-		}
+	// Create a list of available enchantments for each slot. The override
+	// affects the enchantments selected, but keeps the displayed requirements
+	// and validation cost at one level per table level.
+	requirements := []int{
+		upperLevelCost,
+		middleLevelCost,
+		lowerLevelCost,
+	}
+	if powerOverride > 0 {
+		requirements = []int{1, 2, 3}
+	}
+	return requirements, [][]item.Enchantment{
+		createEnchantments(random, stack, value, upperLevelCost),
+		createEnchantments(random, stack, value, middleLevelCost),
+		createEnchantments(random, stack, value, lowerLevelCost),
+	}
 }
 
 // treasureEnchantment represents an enchantment that may be a treasure enchantment.

@@ -14,22 +14,23 @@ type LiquidRemovable interface {
 	HasLiquidDrops() bool
 }
 
-// sourceWaterDisplacer may be embedded to allow displacing water source blocks.
+// sourceWaterDisplacer may be embedded by blocks that would waterlog in vanilla.
+// Hera disables waterlogging: CanDisplace always returns false so liquids only
+// occupy replaceable cells (air / LiquidRemovable), never layer-1 inside solids.
 type sourceWaterDisplacer struct{}
 
-// CanDisplace returns true if the world.Liquid passed is of the type Water, not falling and has a depth of 8.
+// CanDisplace always returns false (waterlogging disabled).
 func (s sourceWaterDisplacer) CanDisplace(b world.Liquid) bool {
-	w, ok := b.(Water)
-	return ok && !w.Falling && w.Depth == 8
+	return false
 }
 
-// flowingWaterDisplacer may be embedded to allow displacing water source blocks or flowing water.
+// flowingWaterDisplacer may be embedded by blocks that would waterlog flowing water.
+// Waterlogging is disabled ΓÇö see sourceWaterDisplacer.
 type flowingWaterDisplacer struct{}
 
-// CanDisplace returns true if the world.Liquid passed is of the type Water.
+// CanDisplace always returns false (waterlogging disabled).
 func (s flowingWaterDisplacer) CanDisplace(b world.Liquid) bool {
-	_, ok := b.(Water)
-	return ok
+	return false
 }
 
 // tickLiquid ticks the liquid block passed at a specific position in the world. Depending on the surroundings

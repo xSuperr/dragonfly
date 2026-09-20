@@ -88,10 +88,9 @@ func (s Slab) FuelInfo() item.FuelInfo {
 	return item.FuelInfo{}
 }
 
-// CanDisplace ...
+// CanDisplace always returns false ΓÇö Hera disables waterlogging (see sourceWaterDisplacer).
 func (s Slab) CanDisplace(b world.Liquid) bool {
-	water, ok := b.(Water)
-	return !s.Double && ok && water.Depth == 8
+	return false
 }
 
 // SideClosed ...

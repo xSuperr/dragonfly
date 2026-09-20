@@ -34,11 +34,15 @@ func (m *Movement) Send() {
 	velChanged := !m.dvel.ApproxEqualThreshold(zeroVec3, epsilon)
 
 	for _, v := range m.v {
-		if posChanged {
-			v.ViewEntityMovement(m.e, m.pos, m.rot, m.onGround)
-		}
+		// Velocity must be published before movement. Capture adapters cache
+		// velocity from ViewEntityVelocity and attach it to the next movement
+		// sample ΓÇö sending movement first permanently stamps settled entities
+		// with their previous falling velocity.
 		if velChanged {
 			v.ViewEntityVelocity(m.e, m.vel)
+		}
+		if posChanged || velChanged {
+			v.ViewEntityMovement(m.e, m.pos, m.rot, m.onGround)
 		}
 	}
 }
@@ -78,6 +82,12 @@ func (c *MovementComputer) TickMovement(e world.Entity, pos, vel mgl64.Vec3, rot
 // OnGround checks if the entity that this computer calculates is currently on the ground.
 func (c *MovementComputer) OnGround() bool {
 	return c.onGround
+}
+
+// SetOnGround updates the ground contact flag used by subsequent TickMovement
+// friction and by callers that bypass TickMovement (e.g. Nop physics hooks).
+func (c *MovementComputer) SetOnGround(onGround bool) {
+	c.onGround = onGround
 }
 
 // zeroVec3 is a mgl64.Vec3 with zero values.

@@ -24,6 +24,10 @@ type EntityFilter func(iter.Seq[world.Entity]) iter.Seq[world.Entity]
 // ray. The physics.BBox that's passed is used for checking if any entity within the bounding box collided
 // with the ray.
 func Perform(start, end mgl64.Vec3, tx *world.Tx, box cube.BBox, filter EntityFilter) (hit Result, ok bool) {
+	if !finiteVec3(start) || !finiteVec3(end) {
+		return nil, false
+	}
+
 	// Check if there's any blocks that we may collide with.
 	TraverseBlocks(start, end, func(pos cube.Pos) (cont bool) {
 		b := tx.Block(pos)

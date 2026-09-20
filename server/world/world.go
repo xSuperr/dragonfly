@@ -53,6 +53,8 @@ type World struct {
 	set     *Settings
 	handler atomic.Pointer[Handler]
 
+	enchantingTablePower atomic.Int32
+
 	weather
 
 	// closeStarted closes as soon as World.Close begins, before the close
@@ -84,6 +86,22 @@ type World struct {
 
 	viewerMu sync.Mutex
 	viewers  map[*Loader]Viewer
+
+	// Heartbeat fields are sampled by the temporary world watchdog. They must
+	// remain atomic because the watchdog intentionally runs while the owner may
+	// be blocked and cannot safely inspect owner-owned maps or settings.
+	heartbeatName          atomic.Value // string
+	heartbeatCurrentTick   atomic.Int64
+	heartbeatCompletedTick atomic.Int64
+	heartbeatLastCompleted atomic.Int64
+	heartbeatTickStarted   atomic.Int64
+	heartbeatLastDuration  atomic.Int64
+	heartbeatOwnerStarted  atomic.Int64
+	heartbeatPhase         atomic.Uint32
+	heartbeatOwnerPanics   atomic.Uint64
+	heartbeatPendingChunks atomic.Int64
+	heartbeatLoadedChunks  atomic.Int64
+	heartbeatViewers       atomic.Int64
 }
 
 // transaction is a type that may be added to the transaction queue of a World.
@@ -109,6 +127,12 @@ func (w *World) Name() string {
 	w.set.Lock()
 	defer w.set.Unlock()
 	return w.set.Name
+}
+
+// Closed reports whether closing of the World has started. A closed world
+// rejects normal tasks and must not be used as a transfer destination.
+func (w *World) Closed() bool {
+	return w == nil || w.closed.Load()
 }
 
 // Dimension returns the Dimension assigned to the World in world.New. The sky
@@ -197,12 +221,27 @@ func (w *World) handleTransactions() {
 	for {
 		select {
 		case tx := <-w.queue:
-			tx.Run(w)
+			w.runTransaction(tx)
 		case <-w.queueClosing:
 			w.queueing.Done()
 			return
 		}
 	}
+}
+
+// runTransaction records the owner boundary and protects the owner loop from
+// an unexpected transaction implementation panic. The concrete normal and
+// weak transactions also recover themselves so their completion channels are
+// released; this outer guard covers future transaction implementations.
+func (w *World) runTransaction(tx transaction) {
+	w.beginOwnerTransaction()
+	defer func() {
+		w.endOwnerTransaction()
+		if r := recover(); r != nil {
+			w.recordOwnerPanic("owner boundary", r)
+		}
+	}()
+	tx.Run(w)
 }
 
 // EntityRegistry returns the EntityRegistry that was passed to the World's
@@ -1189,6 +1228,8 @@ func (w *World) Save() {
 // save saves all loaded chunks to the World's provider.
 func (w *World) save(f func(*Tx, ChunkPos, *Column)) execFunc {
 	return func(tx *Tx) {
+		end := w.tracePhase(TickPhaseAutosave, "world.autosave")
+		defer end()
 		if w.conf.ReadOnly {
 			return
 		}
@@ -1225,7 +1266,10 @@ func (w *World) closeChunk(tx *Tx, pos ChunkPos, c *Column) {
 		_ = e.mustEntity(tx).Close()
 	}
 	clear(c.Entities)
-	delete(w.chunks, pos)
+	if _, ok := w.chunks[pos]; ok {
+		delete(w.chunks, pos)
+		w.heartbeatLoadedChunks.Add(-1)
+	}
 }
 
 // Close closes the world and saves all chunks currently loaded.
@@ -1252,7 +1296,12 @@ func (w *World) close() {
 		tx.runDeferred()
 		w.Handle(NopHandler{})
 
-		w.save(w.closeChunk)(tx)
+		// Always tear down loaded entities, including in ReadOnly template
+		// worlds. save() intentionally returns early for ReadOnly worlds, but
+		// skipping closeChunk would leave players attached to a dead world.
+		for pos, c := range w.chunks {
+			w.closeChunk(tx, pos, c)
+		}
 	})
 	w.scheduleMu.Lock()
 	w.closeAcceptingEntityTasks.Store(false)
@@ -1293,7 +1342,10 @@ func (w *World) allViewers() ([]Viewer, []*Loader) {
 // viewer isn't viewing any chunks.
 func (w *World) addWorldViewer(l *Loader) {
 	w.viewerMu.Lock()
-	w.viewers[l] = l.viewer
+	if _, exists := w.viewers[l]; !exists {
+		w.viewers[l] = l.viewer
+		w.heartbeatViewers.Add(1)
+	}
 	w.viewerMu.Unlock()
 
 	l.viewer.ViewTime(w.Time())
@@ -1371,6 +1423,8 @@ func (tx *Tx) chunk(pos ChunkPos) *Column {
 	if ok {
 		return c
 	}
+	end := w.tracePhase(TickPhaseChunkProcessing, "world.chunk_processing")
+	defer end()
 	c, ok = w.chunkFromAsyncPool(tx, pos)
 	if ok {
 		return c
@@ -1428,6 +1482,7 @@ func (w *World) loadChunkAsync(tx *Tx, pos ChunkPos, callback chunkCallback) boo
 		return false
 	}
 	w.chunkRequests[pos] = req
+	w.heartbeatPendingChunks.Add(1)
 	return true
 }
 
@@ -1435,8 +1490,11 @@ func (w *World) loadChunkAsync(tx *Tx, pos ChunkPos, callback chunkCallback) boo
 // entities and spreading light to neighbouring chunks. The chunk passed must
 // already have its own light calculated.
 func (w *World) addChunk(pos ChunkPos, c *chunk.Column) *Column {
+	end := w.tracePhase(TickPhaseChunkProcessing, "world.chunk_processing")
+	defer end()
 	column := w.columnFrom(c, pos)
 	w.chunks[pos] = column
+	w.heartbeatLoadedChunks.Add(1)
 	for _, e := range column.Entities {
 		w.entities[e] = pos
 		e.setAndUnlockWorld(w)
@@ -1520,6 +1578,8 @@ func (w *World) autoSave() {
 
 // closeUnusedChunk closes all chunks currently not in use by any viewer.
 func (w *World) closeUnusedChunks(tx *Tx) {
+	end := w.tracePhase(TickPhaseAutosave, "world.chunk_unload")
+	defer end()
 	for pos, c := range w.chunks {
 		if len(c.viewers) == 0 {
 			w.closeChunk(tx, pos, c)

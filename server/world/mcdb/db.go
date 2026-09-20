@@ -147,6 +147,99 @@ func (db *DB) LoadColumn(pos world.ChunkPos, dim world.Dimension) (*chunk.Column
 	return col, nil
 }
 
+// WriteDefaultBiomes replaces every stored 3D biome payload with a valid disk
+// encoded payload containing biome ID 0 for every sub-chunk. The heightmap
+// prefix is preserved. This operates directly on the LevelDB records so it
+// can repair a column that DiskDecode cannot load.
+func (db *DB) WriteDefaultBiomes() (int, error) {
+	if db == nil || db.ldb == nil {
+		return 0, errors.New("nil map database")
+	}
+
+	type update struct {
+		key  []byte
+		data []byte
+	}
+	updates := make([]update, 0)
+	iter := db.ldb.NewIterator(nil, nil)
+	for iter.Next() {
+		key := append([]byte(nil), iter.Key()...)
+		k, ok, err := parse3DDataKey(key)
+		if err != nil {
+			iter.Release()
+			return 0, err
+		}
+		if !ok {
+			continue
+		}
+		raw := iter.Value()
+		if len(raw) < 512 {
+			iter.Release()
+			return 0, fmt.Errorf("3D biome record %v (%v) is only %d bytes; expected at least 512", k.pos, k.dim, len(raw))
+		}
+		biomes := defaultBiomeData(k.dim.Range())
+		data := make([]byte, 512+len(biomes))
+		copy(data, raw[:512])
+		copy(data[512:], biomes)
+		updates = append(updates, update{key: key, data: data})
+	}
+	if err := iter.Error(); err != nil {
+		iter.Release()
+		return 0, fmt.Errorf("iterate 3D biome records: %w", err)
+	}
+	iter.Release()
+
+	const batchSize = 256
+	for start := 0; start < len(updates); start += batchSize {
+		end := start + batchSize
+		if end > len(updates) {
+			end = len(updates)
+		}
+		batch := leveldb.MakeBatch(end - start)
+		for _, item := range updates[start:end] {
+			batch.Put(item.key, item.data)
+		}
+		if err := db.ldb.Write(batch, nil); err != nil {
+			return start, fmt.Errorf("write repaired 3D biome records: %w", err)
+		}
+	}
+	return len(updates), nil
+}
+
+func parse3DDataKey(key []byte) (dbKey, bool, error) {
+	if (len(key) != 9 && len(key) != 13) || key[len(key)-1] != key3DData {
+		return dbKey{}, false, nil
+	}
+	k := dbKey{
+		pos: world.ChunkPos{
+			int32(binary.LittleEndian.Uint32(key[:4])),
+			int32(binary.LittleEndian.Uint32(key[4:8])),
+		},
+		dim: world.Overworld,
+	}
+	if len(key) == 13 {
+		id := int(binary.LittleEndian.Uint32(key[8:12]))
+		dim, ok := world.DimensionByID(id)
+		if !ok {
+			return dbKey{}, false, fmt.Errorf("unknown dimension id %d in 3D biome key", id)
+		}
+		k.dim = dim
+	}
+	return k, true, nil
+}
+
+func defaultBiomeData(r cube.Range) []byte {
+	// A disk storage with zero bits per index is one header byte followed by a
+	// little-endian uint32 palette value. Biome ID 0 is Dragonfly's default
+	// empty biome value.
+	storages := (r.Height() >> 4) + 1
+	data := make([]byte, storages*5)
+	for i := 0; i < storages; i++ {
+		binary.LittleEndian.PutUint32(data[i*5+1:], 0)
+	}
+	return data
+}
+
 const chunkVersion = 42
 
 func (db *DB) column(k dbKey) (*chunk.Column, error) {

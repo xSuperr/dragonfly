@@ -144,6 +144,9 @@ func (e *Ent) updateState() {
 // Tick ticks Ent, progressing its lifetime and closing the entity if it is
 // in the void.
 func (e *Ent) Tick(tx *world.Tx, current int64) {
+	if e.data.TickDisabled {
+		return
+	}
 	e.deferPortalTravel = true
 	defer func() {
 		e.deferPortalTravel = false

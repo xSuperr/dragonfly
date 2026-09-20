@@ -122,7 +122,10 @@ func (r *chunkRequest) signal(tx *Tx) {
 	w := tx.World()
 	pos := r.pos
 
-	delete(w.chunkRequests, pos)
+	if _, ok := w.chunkRequests[pos]; ok {
+		delete(w.chunkRequests, pos)
+		w.heartbeatPendingChunks.Add(-1)
+	}
 	if w.closed.Load() {
 		return
 	}

@@ -130,6 +130,15 @@ type Session struct {
 
 // debugShapeUpdate represents a pending debug shape mutation. If shape is nil, the update removes the
 // debug shape with the matching ID. Updates are applied in order when the session sends debug shapes.
+// ClearTeleportAck clears the server-side movement gate installed by a self-teleport.
+// Hera uses this after a recovered world transfer so a stale client position
+// cannot leave the player unable to move indefinitely.
+func (s *Session) ClearTeleportAck() {
+	if s != nil {
+		s.teleportPos.Store(nil)
+	}
+}
+
 type debugShapeUpdate struct {
 	id    int
 	shape debug.Shape

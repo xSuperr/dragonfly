@@ -149,6 +149,45 @@ func (e *EntityHandle) Entity(tx *Tx) (Entity, bool) {
 	return e.t.Open(tx, e, &e.data), true
 }
 
+// SetPosAndRotNoUpdate changes an entity's presentation pose without running
+// movement physics or entity handlers. Viewers receive an authoritative
+// force-move and a zeroed velocity so client-side gravity cannot drift the
+// entity between updates. It is intended for server-controlled visual entities
+// such as replay playback.
+func (e *EntityHandle) SetPosAndRotNoUpdate(tx *Tx, pos mgl64.Vec3, rot cube.Rotation, onGround bool) bool {
+	if e == nil || tx == nil {
+		return false
+	}
+	entity, ok := e.Entity(tx)
+	if !ok {
+		return false
+	}
+	e.data.Pos = pos
+	e.data.Rot = rot
+	e.data.Vel = mgl64.Vec3{}
+	for _, viewer := range tx.Viewers(pos) {
+		viewer.ViewEntityVelocity(entity, mgl64.Vec3{})
+		viewer.ViewEntityDisplacement(entity, pos, rot, onGround)
+	}
+	return true
+}
+
+// SetTickDisabled disables autonomous simulation for the entity opened from
+// this handle. It is intended for server-controlled visual entities such as
+// replay playback.
+func (e *EntityHandle) SetTickDisabled(disabled bool) {
+	if e != nil {
+		e.data.TickDisabled = disabled
+	}
+}
+
+// TickDisabled reports whether autonomous simulation is disabled for this
+// handle. Sessions use this to suppress client-side gravity on presentation
+// entities such as replay item drops.
+func (e *EntityHandle) TickDisabled() bool {
+	return e != nil && e.data.TickDisabled
+}
+
 // mustEntity calls Entity but panics if the worlds do not match.
 func (e *EntityHandle) mustEntity(tx *Tx) Entity {
 	if ent, ok := e.Entity(tx); ok {
@@ -423,6 +462,7 @@ type EntityData struct {
 	AlwaysShowNameTag bool
 	FireDuration      time.Duration
 	Age               time.Duration
+	TickDisabled      bool
 
 	Data any
 }
@@ -510,6 +550,8 @@ type EntityRegistryConfig struct {
 type ArrowSpawnConfig struct {
 	// Damage specifies the base damage dealt by the arrow.
 	Damage float64
+	// PowerLevel specifies the level of the Power enchantment applied to the arrow.
+	PowerLevel int
 	// Owner is the entity that fired the arrow.
 	Owner Entity
 	// Critical specifies if the arrow should deal critical damage.

@@ -73,7 +73,7 @@ func DiskDecode(br BlockRegistry, data SerialisedData, r cube.Range) (*Chunk, er
 
 	err := decodeBiomes(bytes.NewBuffer(data.Biomes), c, DiskEncoding)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode disk biomes (range=%v, biome bytes=%d): %w", r, len(data.Biomes), err)
 	}
 	for i, sub := range data.SubChunks {
 		if len(sub) == 0 {
@@ -138,15 +138,30 @@ func decodeBiomes(buf *bytes.Buffer, c *Chunk, e Encoding) error {
 	var last *PalettedStorage
 	if buf.Len() != 0 {
 		for i := 0; i < len(c.sub); i++ {
+			before := buf.Len()
+			header := byte(0)
+			prefix := buf.Bytes()
+			if len(prefix) > 32 {
+				prefix = prefix[:32]
+			}
+			if len(prefix) > 0 {
+				header = prefix[0]
+			}
 			b, err := decodePalettedStorage(buf, e, BiomePaletteEncoding)
 			if err != nil {
-				return err
+				return fmt.Errorf(
+					"biome storage %d/%d decode failed (encoding=%T, header=0x%02x, network-bit=%d, bytes-before=%d, bytes-after=%d, payload-prefix=% x): %w",
+					i+1, len(c.sub), e, header, header&1, before, buf.Len(), prefix, err,
+				)
 			}
 			// b == nil means this paletted storage had the flag pointing to the previous one. It basically means we should
 			// inherit whatever palette we decoded last.
 			if i == 0 && b == nil {
 				// This should never happen and there is no way to handle this.
-				return fmt.Errorf("first biome storage pointed to previous one")
+				return fmt.Errorf(
+					"first biome storage pointed to previous one (storage %d/%d, encoding=%T, header=0x%02x, network-bit=%d, block-size=0x%02x, bytes-before=%d, bytes-after=%d, payload-prefix=% x)",
+					i+1, len(c.sub), e, header, header&1, header>>1, before, buf.Len(), prefix,
+				)
 			}
 			if b == nil {
 				// This means this paletted storage had the flag pointing to the previous one. It basically means we should

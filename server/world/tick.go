@@ -46,6 +46,13 @@ func (w *World) AdvanceTick() {
 func (t ticker) tick(tx *Tx) {
 	viewers, loaders := tx.World().allViewers()
 	w := tx.World()
+	w.beginTick()
+	completed := false
+	defer func() {
+		if completed {
+			w.completeTick()
+		}
+	}()
 
 	w.set.Lock()
 	if s := w.set.Spawn; s[1] > tx.Range()[1] && w.Dimension() == Overworld {
@@ -57,6 +64,7 @@ func (t ticker) tick(tx *Tx) {
 		// Don't continue ticking if no viewers are in the world. Synchronous
 		// worlds only tick on explicit AdvanceTick calls, so they always tick.
 		w.set.Unlock()
+		completed = true
 		return
 	}
 	if w.advance {
@@ -70,6 +78,7 @@ func (t ticker) tick(tx *Tx) {
 	}
 
 	rain, thunder, tick, tim, cycle := w.set.Raining, w.set.Thundering && w.set.Raining, w.set.CurrentTick, int(w.set.Time), w.set.TimeCycle
+	w.heartbeatCurrentTick.Store(tick)
 
 	tryAdvanceDay := false
 	if tx.w.set.RequiredSleepTicks > 0 {
@@ -97,11 +106,26 @@ func (t ticker) tick(tx *Tx) {
 		w.tickLightning(tx)
 	}
 
+	end := w.tracePhase(TickPhaseEntities, "world.entities")
 	t.tickEntities(tx, tick)
+	end()
+
+	end = w.tracePhase(TickPhaseScheduledBlocks, "world.scheduled_blocks")
 	w.scheduledUpdates.tick(tx, tick)
+	end()
+
+	end = w.tracePhase(TickPhaseRandomTicks, "world.random_ticks")
 	t.tickBlocksRandomly(tx, loaders, tick)
+	end()
+
+	end = w.tracePhase(TickPhaseNeighbourUpdates, "world.neighbour_updates")
 	t.performNeighbourUpdates(tx)
+	end()
+
+	end = w.tracePhase(TickPhaseRedstone, "world.redstone")
 	w.redstone.tick(tx, tick)
+	end()
+	completed = true
 }
 
 // performNeighbourUpdates performs all block updates that came as a result of a neighbouring block being changed.

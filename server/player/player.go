@@ -58,7 +58,7 @@ type playerData struct {
 	heldSlot                     *uint32
 
 	sneaking, sprinting, swimming, gliding, crawling, flying,
-	invisible, immobile, onGround, usingItem bool
+	invisible, immobile, tickDisabled, onGround, usingItem bool
 
 	sleeping bool
 	sleepPos cube.Pos
@@ -766,6 +766,27 @@ func (p *Player) KnockBack(src mgl64.Vec3, force, height float64) {
 	p.knockBack(src, force, height)
 }
 
+// NopKnockBackHook optionally post-processes knockback for sessionless (Nop) players.
+// Hera seeds the bot recovery gate here and applies live KBTune shaping.
+var NopKnockBackHook func(p *Player, velocity mgl64.Vec3) mgl64.Vec3
+
+// NopMovementParams optionally overrides Gravity/Drag for Nop TickMovement
+// (Hera /botkb live tuning). Nil = use MovementComputer defaults.
+var NopMovementParams func() (gravity, drag float64, dragBeforeGravity bool)
+
+// KnockBackMotionHook is called with the final knockback velocity immediately
+// before SetVelocity (after NopKnockBackHook). Read-only telemetry.
+var KnockBackMotionHook func(p *Player, velocity mgl64.Vec3)
+
+// NopTickMotionHook is called after Nop TickMovement with post-integrate pos/vel.
+// Read-only telemetry for bot KB traces.
+var NopTickMotionHook func(p *Player, pos, vel mgl64.Vec3)
+
+// NopPhysicsHook optionally replaces MovementComputer integration for a Nop
+// player. When it returns true the hook has already committed position,
+// next-frame velocity, and ground state (see CommitNopMotion).
+var NopPhysicsHook func(p *Player) bool
+
 // knockBack is an unexported function that is used to knock the player back. This function does not check if the player
 // can take damage or not.
 func (p *Player) knockBack(src mgl64.Vec3, force, height float64) {
@@ -776,8 +797,15 @@ func (p *Player) knockBack(src mgl64.Vec3, force, height float64) {
 		velocity = velocity.Normalize().Mul(force)
 	}
 	velocity[1] = height
+	velocity = velocity.Mul(1 - p.Armour().KnockBackResistance())
 
-	p.SetVelocity(velocity.Mul(1 - p.Armour().KnockBackResistance()))
+	if p.session() == session.Nop && NopKnockBackHook != nil {
+		velocity = NopKnockBackHook(p, velocity)
+	}
+	if KnockBackMotionHook != nil {
+		KnockBackMotionHook(p, velocity)
+	}
+	p.SetVelocity(velocity)
 }
 
 // setAttackImmunity sets the duration the player is immune to entity attacks.
@@ -1281,7 +1309,18 @@ func (p *Player) Jump() {
 		if e, ok := p.Effect(effect.JumpBoost); ok {
 			jumpVel = float64(e.Level()) / 10
 		}
-		p.data.Vel = mgl64.Vec3{0, jumpVel}
+		// Bedrock keeps horizontal momentum on jump. Preserve X/Z for Nop bots
+		// (server-simulated); session players ignore server Vel anyway.
+		if p.session() == session.Nop {
+			v := p.data.Vel
+			v[1] = jumpVel
+			p.data.Vel = v
+			for _, viewer := range p.viewers() {
+				viewer.ViewEntityVelocity(p, v)
+			}
+		} else {
+			p.data.Vel = mgl64.Vec3{0, jumpVel}
+		}
 	}
 	if p.Sprinting() {
 		p.Exhaust(0.2)
@@ -1396,6 +1435,12 @@ func (p *Player) SetImmobile() {
 	p.updateState()
 }
 
+// SetTickDisabled disables autonomous player simulation. It is intended for
+// presentation-only entities such as replay players.
+func (p *Player) SetTickDisabled(disabled bool) {
+	p.tickDisabled = disabled
+}
+
 // SetMobile allows the player to freely move around again after being immobile.
 func (p *Player) SetMobile() {
 	if !p.Immobile() {
@@ -1498,7 +1543,7 @@ func (p *Player) SetHeldSlot(to int) error {
 		return nil
 	}
 	*p.heldSlot = uint32(to)
-	p.usingItem = false
+	p.stopUsingItem()
 
 	for _, viewer := range p.viewers() {
 		viewer.ViewEntityItems(p)
@@ -1577,15 +1622,65 @@ func (p *Player) SetCooldown(item world.Item, cooldown time.Duration) {
 // This generally happens for items such as throwable items like snowballs.
 func (p *Player) UseItem() {
 	i, _ := p.HeldItems()
+	it := i.Item()
+
+	// A second click while an item is being used is a completion/cancellation
+	// signal, not a new use. In particular, restarting usingSince here causes
+	// fast bow toggles to extend the charge instead of cancelling the use.
+	if p.usingItem {
+		switch usable := it.(type) {
+		case item.Chargeable:
+			useCtx := p.useContext()
+			dur := p.useDuration()
+			if usable.Charge(p, p.tx, useCtx, dur) {
+				p.session().SendChargeItemComplete()
+			}
+			p.handleUseContext(useCtx)
+			p.stopUsingItem()
+		case item.Consumable:
+			if c, ok := usable.(interface{ CanConsume() bool }); ok && !c.CanConsume() {
+				p.stopUsingItem()
+				return
+			}
+			if !usable.AlwaysConsumable() && p.GameMode().AllowsTakingDamage() && p.Food() >= 20 {
+				p.stopUsingItem()
+				return
+			}
+
+			useCtx, dur := p.useContext(), p.useDuration()
+			if dur < usable.ConsumeDuration() {
+				// The client may send this click before the item's animation
+				// duration has elapsed. PMMP still ends the use state.
+				p.stopUsingItem()
+				return
+			}
+			ctx := NewEventContext(p.tx, p)
+			if p.Handler().HandleItemConsume(ctx, i); ctx.Cancelled() {
+				p.stopUsingItem()
+				return
+			}
+			useCtx.CountSub, useCtx.NewItem = 1, usable.Consume(p.tx, p)
+			p.handleUseContext(useCtx)
+			p.tx.PlaySound(p.Position().Add(mgl64.Vec3{0, 1.5}), sound.Burp{})
+			p.stopUsingItem()
+		default:
+			// This covers releasable-only items such as bows and spyglasses,
+			// as well as instant-use items such as goat horns. Their actual
+			// release path is handled by ReleaseItemTransaction.
+			p.stopUsingItem()
+		}
+		return
+	}
+
 	ctx := NewEventContext(p.tx, p)
-	if p.HasCooldown(i.Item()) {
+	if p.HasCooldown(it) {
 		return
 	}
 	if p.Handler().HandleItemUse(ctx); ctx.Cancelled() {
 		return
 	}
 	i, left := p.HeldItems()
-	it := i.Item()
+	it = i.Item()
 
 	if cd, ok := it.(item.Cooldown); ok {
 		p.SetCooldown(it, cd.Cooldown())
@@ -1612,13 +1707,12 @@ func (p *Player) UseItem() {
 		}
 
 		// Stop charging and determine if the item is ready.
-		p.usingItem = false
 		dur := p.useDuration()
 		if usable.Charge(p, p.tx, useCtx, dur) {
 			p.session().SendChargeItemComplete()
 		}
 		p.handleUseContext(useCtx)
-		p.updateState()
+		p.stopUsingItem()
 	case item.Usable:
 		useCtx := p.useContext()
 		if !usable.Use(p.tx, p, useCtx) {
@@ -1631,37 +1725,20 @@ func (p *Player) UseItem() {
 		p.addNewItem(useCtx)
 	case item.Consumable:
 		if c, ok := usable.(interface{ CanConsume() bool }); ok && !c.CanConsume() {
-			p.ReleaseItem()
+			p.stopUsingItem()
 			return
 		}
 		if !usable.AlwaysConsumable() && p.GameMode().AllowsTakingDamage() && p.Food() >= 20 {
 			// The item.Consumable is not always consumable, the player is not in creative mode and the
 			// food bar is filled: The item cannot be consumed.
-			p.ReleaseItem()
+			p.stopUsingItem()
 			return
 		}
 		if !p.usingItem {
 			// Consumable starts being consumed: Set the start timestamp and update the using state to viewers.
 			p.usingItem, p.usingSince = true, time.Now()
 			p.updateState()
-			return
 		}
-		// The player is currently using the item held. This is a signal the item was consumed, so we
-		// consume it and start using it again.
-		useCtx, dur := p.useContext(), p.useDuration()
-		if dur < usable.ConsumeDuration() {
-			// The required duration for consuming this item was not met, so we don't consume it.
-			return
-		}
-		// Reset the duration for the next item to be consumed.
-		p.usingSince = time.Now()
-		ctx := NewEventContext(p.tx, p)
-		if p.Handler().HandleItemConsume(ctx, i); ctx.Cancelled() {
-			return
-		}
-		useCtx.CountSub, useCtx.NewItem = 1, usable.Consume(p.tx, p)
-		p.handleUseContext(useCtx)
-		p.tx.PlaySound(p.Position().Add(mgl64.Vec3{0, 1.5}), sound.Burp{})
 	}
 }
 
@@ -1671,11 +1748,14 @@ func (p *Player) UseItem() {
 // ReleaseItem either aborts the using of the item or finished it, depending on the time that elapsed since
 // the item started being used.
 func (p *Player) ReleaseItem() {
-	if !p.usingItem || !p.canRelease() || !p.GameMode().AllowsInteraction() {
-		p.usingItem = false
+	if !p.usingItem {
 		return
 	}
-	p.usingItem = false
+	defer p.stopUsingItem()
+
+	if !p.canRelease() || !p.GameMode().AllowsInteraction() {
+		return
+	}
 
 	useCtx, dur := p.useContext(), p.useDuration()
 	i, _ := p.HeldItems()
@@ -1685,6 +1765,38 @@ func (p *Player) ReleaseItem() {
 	}
 	i.Item().(item.Releasable).Release(p, p.tx, useCtx, dur)
 	p.handleUseContext(useCtx)
+}
+
+// StopUsingItem cancels the current duration-based item use without invoking
+// the item's release action. It is used for interrupts such as changing slots,
+// interacting with a block, or receiving another player action.
+func (p *Player) StopUsingItem() {
+	p.stopUsingItem()
+}
+
+// SetUsingItem changes the visible item-use state without invoking item
+// behaviour. It is intended for server-controlled visual playback and other
+// integrations that need to reproduce the state without consuming or
+// releasing the held item.
+func (p *Player) SetUsingItem(using bool) {
+	if p.usingItem == using {
+		return
+	}
+	p.usingItem = using
+	if using {
+		p.usingSince = time.Now()
+	} else {
+		p.usingSince = time.Time{}
+	}
+	p.updateState()
+}
+
+func (p *Player) stopUsingItem() {
+	if !p.usingItem {
+		return
+	}
+	p.usingItem = false
+	p.usingSince = time.Time{}
 	p.updateState()
 }
 
@@ -1756,6 +1868,9 @@ func (p *Player) UsingItem() bool {
 // returns immediately.
 // UseItemOnBlock does nothing if the block at the cube.Pos passed is of the type block.Air.
 func (p *Player) UseItemOnBlock(pos cube.Pos, face cube.Face, clickPos mgl64.Vec3) {
+	// A block interaction is an interrupt, even when the block is out of
+	// range or the interaction is rejected by a handler.
+	p.stopUsingItem()
 	if _, ok := p.tx.Block(pos).(block.Air); ok || !p.canReach(pos.Vec3Centre()) {
 		// The client used its item on a block that does not exist server-side or one it couldn't reach. Stop trying
 		// to use the item immediately.
@@ -2132,6 +2247,11 @@ func (p *Player) obstructedPos(pos cube.Pos, b world.Block) (obstructed, selfOnl
 		case entity.ItemType, entity.ArrowType, entity.ExperienceOrbType:
 			continue
 		default:
+			if g, ok := e.(interface{ GameMode() world.GameMode }); ok {
+				if mode := g.GameMode(); mode != nil && !mode.HasCollision() {
+					continue
+				}
+			}
 			if cube.AnyIntersections(blockBoxes, t.BBox(e).Translate(e.Position()).Grow(-1e-4)) {
 				obstructed = true
 				if e.H() == p.handle {
@@ -2286,6 +2406,18 @@ func (p *Player) Teleport(pos mgl64.Vec3) {
 	p.forceTeleport(pos)
 }
 
+// SetPosAndRotNoUpdate changes a player presentation pose without invoking
+// movement handlers, collision checks, or teleport semantics. It is intended
+// for server-controlled visual entities such as replay playback.
+func (p *Player) SetPosAndRotNoUpdate(pos mgl64.Vec3, rot cube.Rotation) {
+	p.data.Pos = pos
+	p.data.Rot = rot
+	p.data.Vel = mgl64.Vec3{}
+	for _, v := range p.viewers() {
+		v.ViewEntityMovement(p, pos, rot, false)
+	}
+}
+
 // forceTeleport teleports the player without calling the Handler.
 // It also wakes up the player from sleep.
 func (p *Player) forceTeleport(pos mgl64.Vec3) {
@@ -2339,8 +2471,9 @@ func (p *Player) Move(deltaPos mgl64.Vec3, deltaYaw, deltaPitch float64) {
 
 	p.data.Pos = res
 	p.data.Rot = resRot
-	if deltaPos.Len() <= 3 {
-		// Only update velocity if the player is not moving too fast to prevent potential OOMs.
+	// Only derive velocity from a real translation. Rotation-only Move (common for
+	// Nop AI look turns) must not wipe knockback / TickMovement velocity with {0,0,0}.
+	if !deltaPos.ApproxEqual(mgl64.Vec3{}) && deltaPos.Len() <= 3 {
 		p.data.Vel = deltaPos
 		p.checkBlockCollisions(deltaPos)
 	}
@@ -2408,16 +2541,40 @@ func (p *Player) Velocity() mgl64.Vec3 {
 	return p.data.Vel
 }
 
-// SetVelocity updates the player's velocity. If there is an attached session, this will just send
-// the velocity to the player session for the player to update.
+// SetVelocity updates the player's velocity. Sessionless (Nop) players store velocity for
+// server-side TickMovement and still broadcast SetActorMotion so viewers see knockback
+// the same way they do for real players. Connected players only receive the motion packet
+// (client-owned movement).
 func (p *Player) SetVelocity(velocity mgl64.Vec3) {
 	if p.session() == session.Nop {
 		p.data.Vel = velocity
-		return
 	}
 	for _, v := range p.viewers() {
 		v.ViewEntityVelocity(p, velocity)
 	}
+}
+
+// CommitNopMotion commits a server-authoritative position and next-frame velocity for
+// sessionless players without deriving velocity from the displacement (Move would).
+// onGround updates both the MovementComputer and player ground flags used by OnGround.
+func (p *Player) CommitNopMotion(pos, nextVel mgl64.Vec3, onGround bool) {
+	if p.session() != session.Nop || p.Dead() {
+		return
+	}
+	delta := pos.Sub(p.Position())
+	rot := p.Rotation()
+	for _, v := range p.viewers() {
+		v.ViewEntityMovement(p, pos, rot, onGround)
+		v.ViewEntityVelocity(p, nextVel)
+	}
+	p.data.Pos = pos
+	p.data.Vel = nextVel
+	p.mc.SetOnGround(onGround)
+	p.onGround = onGround
+	if !delta.ApproxEqual(mgl64.Vec3{}) {
+		p.checkBlockCollisions(delta)
+	}
+	p.updateFallState(delta.Y())
 }
 
 // Rotation returns the yaw and pitch of the player in degrees. Yaw is horizontal rotation (rotation around the
@@ -2636,6 +2793,9 @@ func (p *Player) Tick(tx *world.Tx, current int64) {
 	if p.Dead() {
 		return
 	}
+	if p.tickDisabled {
+		return
+	}
 	if _, ok := p.tx.Liquid(cube.PosFromVec3(p.Position())); !ok {
 		p.StopSwimming()
 		if _, ok := p.Armour().Helmet().Item().(item.TurtleShell); ok {
@@ -2713,11 +2873,24 @@ func (p *Player) Tick(tx *world.Tx, current int64) {
 	p.prevWorld = tx.World()
 
 	if p.session() == session.Nop && !p.Immobile() {
-		m := p.mc.TickMovement(p, p.Position(), p.Velocity(), p.Rotation(), p.tx)
-		m.Send()
+		handled := NopPhysicsHook != nil && NopPhysicsHook(p)
+		if !handled {
+			// Live bot KB tune can override gravity/drag without rebuilding.
+			origG, origD, origDB := p.mc.Gravity, p.mc.Drag, p.mc.DragBeforeGravity
+			if NopMovementParams != nil {
+				g, d, db := NopMovementParams()
+				p.mc.Gravity, p.mc.Drag, p.mc.DragBeforeGravity = g, d, db
+			}
+			m := p.mc.TickMovement(p, p.Position(), p.Velocity(), p.Rotation(), p.tx)
+			p.mc.Gravity, p.mc.Drag, p.mc.DragBeforeGravity = origG, origD, origDB
+			m.Send()
 
-		p.data.Vel = m.Velocity()
-		p.Move(m.Position().Sub(p.Position()), 0, 0)
+			p.data.Vel = m.Velocity()
+			p.Move(m.Position().Sub(p.Position()), 0, 0)
+		}
+		if NopTickMotionHook != nil {
+			NopTickMotionHook(p, p.Position(), p.data.Vel)
+		}
 	} else {
 		p.data.Vel = mgl64.Vec3{}
 	}
@@ -3177,6 +3350,17 @@ func (p *Player) SwingArm() {
 	}
 	for _, v := range p.viewers() {
 		v.ViewEntityAction(p, entity.SwingArmAction{})
+	}
+}
+
+// PlayEntityAction broadcasts a visual entity action without applying gameplay
+// behaviour such as damage, item consumption, or release handling.
+func (p *Player) PlayEntityAction(a world.EntityAction) {
+	if p.Dead() || a == nil {
+		return
+	}
+	for _, v := range p.viewers() {
+		v.ViewEntityAction(p, a)
 	}
 }
 

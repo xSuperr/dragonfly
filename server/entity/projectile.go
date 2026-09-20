@@ -32,6 +32,10 @@ type ProjectileBehaviourConfig struct {
 	// back. The base damage is multiplied with the velocity of the projectile
 	// to calculate the final damage of the projectile.
 	Damage float64
+	// damageCalculator calculates the final damage of the projectile. If nil,
+	// Damage is multiplied by the projectile's velocity.
+	damageCalculator func(baseDamage, velocity float64, critical bool, powerLevel int) float64
+	powerLevel       int
 	// Potion is the potion effect that is applied to an entity when the
 	// projectile hits it.
 	Potion potion.Potion
@@ -128,6 +132,18 @@ type ProjectileBehaviour struct {
 	portalTravel     bool
 }
 
+// FiniteVec3 reports whether every component of v is finite. Projectile
+// movement must reject non-finite state before it reaches collision tracing:
+// NaN ray endpoints make voxel traversal unable to satisfy its exit checks.
+func FiniteVec3(v mgl64.Vec3) bool {
+	for _, component := range v {
+		if math.IsNaN(component) || math.IsInf(component, 0) {
+			return false
+		}
+	}
+	return true
+}
+
 // Owner returns the owner of the projectile.
 func (lt *ProjectileBehaviour) Owner() *world.EntityHandle {
 	return lt.conf.Owner
@@ -176,8 +192,16 @@ func (lt *ProjectileBehaviour) Tick(e *Ent, tx *world.Tx) *Movement {
 		}
 		return nil
 	}
+	if !FiniteVec3(e.Position()) || !FiniteVec3(e.Velocity()) {
+		lt.close = true
+		_ = e.Close()
+		return nil
+	}
 	vel := e.Velocity()
 	m, result := lt.tickMovement(e, tx)
+	if m == nil {
+		return nil
+	}
 	e.data.Pos, e.data.Vel, e.data.Rot = m.pos, m.vel, m.rot
 
 	lt.collisionPos, lt.collided, lt.ageCollided = cube.Pos{}, false, 0
@@ -297,9 +321,14 @@ func (lt *ProjectileBehaviour) hitBlockSurviving(e *Ent, r trace.BlockResult, m 
 func (lt *ProjectileBehaviour) hitEntity(victim world.Entity, e *Ent, vel mgl64.Vec3) {
 	owner, _ := lt.conf.Owner.Entity(e.tx)
 	src := ProjectileDamageSource{Projectile: e, Owner: owner}
-	dmg := math.Ceil(lt.conf.Damage * vel.Len())
-	if lt.conf.Critical {
-		dmg += rand.Float64() * dmg / 2
+	var dmg float64
+	if lt.conf.damageCalculator == nil {
+		dmg = math.Ceil(lt.conf.Damage * vel.Len())
+		if lt.conf.Critical {
+			dmg += float64(rand.IntN(int(dmg/2) + 2))
+		}
+	} else {
+		dmg = lt.conf.damageCalculator(lt.conf.Damage, vel.Len(), lt.conf.Critical, lt.conf.powerLevel)
 	}
 	// TODO: Piercing arrows should bypass shield blocking when shields are implemented.
 	if _, vulnerable, ok := HurtEntity(victim, dmg, src); ok && vulnerable {
@@ -327,10 +356,20 @@ func (lt *ProjectileBehaviour) hitEntity(victim world.Entity, e *Ent, vel mgl64.
 // based on gravity and drag.
 func (lt *ProjectileBehaviour) tickMovement(e *Ent, tx *world.Tx) (*Movement, trace.Result) {
 	pos, vel := e.Position(), e.Velocity()
+	if !FiniteVec3(pos) || !FiniteVec3(vel) {
+		lt.close = true
+		_ = e.Close()
+		return nil, nil
+	}
 	viewers := tx.Viewers(pos)
 
 	velBefore := vel
 	vel = lt.mc.applyHorizontalForces(tx, pos, lt.mc.applyVerticalForces(vel))
+	if !FiniteVec3(vel) {
+		lt.close = true
+		_ = e.Close()
+		return nil, nil
+	}
 	rot := cube.Rotation{
 		mgl64.RadToDeg(math.Atan2(vel[0], vel[2])),
 		mgl64.RadToDeg(math.Atan2(vel[1], math.Hypot(vel[0], vel[2]))),
@@ -341,6 +380,11 @@ func (lt *ProjectileBehaviour) tickMovement(e *Ent, tx *world.Tx) (*Movement, tr
 		hit trace.Result
 		ok  bool
 	)
+	if !FiniteVec3(end) {
+		lt.close = true
+		_ = e.Close()
+		return nil, nil
+	}
 	if !mgl64.FloatEqual(end.Sub(pos).LenSqr(), 0) {
 		if hit, ok = trace.Perform(pos, end, tx, e.H().Type().BBox(e).Grow(1.0), lt.ignores(e)); ok {
 			if _, ok := hit.(trace.BlockResult); ok {

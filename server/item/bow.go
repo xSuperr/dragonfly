@@ -11,6 +11,24 @@ import (
 // Bow is a ranged weapon that fires arrows.
 type Bow struct{}
 
+// BowMinChargeTicks is the minimum number of server ticks a bow must be
+// charged before it can fire.
+const BowMinChargeTicks = 3
+
+// BowLaunchSpeed is the Bedrock/Dragonfly full-charge arrow launch speed
+// multiplier applied as velocity = look * force * BowLaunchSpeed.
+const BowLaunchSpeed = 5.0
+
+// BowForce returns the vanilla bow charge force for the number of server ticks
+// the bow was held. The result is capped at 1 once the bow is fully charged.
+func BowForce(ticks int) float64 {
+	if ticks < 0 {
+		return 0
+	}
+	p := float64(ticks) / 20
+	return math.Min((p*p+p*2)/3, 1)
+}
+
 // MaxCount always returns 1.
 func (Bow) MaxCount() int {
 	return 1
@@ -32,14 +50,13 @@ func (Bow) FuelInfo() FuelInfo {
 // Release ...
 func (Bow) Release(releaser Releaser, tx *world.Tx, ctx *UseContext, duration time.Duration) {
 	creative := releaser.GameMode().CreativeInventory()
-	ticks := duration.Milliseconds() / 50
-	if ticks < 3 {
+	ticks := int(duration / (time.Second / 20))
+	if ticks < BowMinChargeTicks {
 		// The player must hold the bow for at least three ticks.
 		return
 	}
 
-	d := float64(ticks) / 20
-	force := math.Min((d*d+d*2)/3, 1)
+	force := BowForce(ticks)
 	if force < 0.1 {
 		// The force must be at least 0.1.
 		return
@@ -61,7 +78,7 @@ func (Bow) Release(releaser Releaser, tx *world.Tx, ctx *UseContext, duration ti
 	}
 
 	held, _ := releaser.HeldItems()
-	damage, punchLevel, burnDuration, consume := 2.0, 0, time.Duration(0), !creative
+	powerLevel, punchLevel, burnDuration, consume := 0, 0, time.Duration(0), !creative
 	for _, enchant := range held.Enchantments() {
 		if f, ok := enchant.Type().(interface{ BurnDuration() time.Duration }); ok {
 			burnDuration = f.BurnDuration()
@@ -69,8 +86,8 @@ func (Bow) Release(releaser Releaser, tx *world.Tx, ctx *UseContext, duration ti
 		if _, ok := enchant.Type().(interface{ KnockBackMultiplier() float64 }); ok {
 			punchLevel = enchant.Level()
 		}
-		if p, ok := enchant.Type().(interface{ PowerDamage(int) float64 }); ok {
-			damage += p.PowerDamage(enchant.Level())
+		if _, ok := enchant.Type().(interface{ PowerDamage(int) float64 }); ok {
+			powerLevel = enchant.Level()
 		}
 		if i, ok := enchant.Type().(interface{ ConsumesArrows() bool }); ok && !i.ConsumesArrows() {
 			consume = false
@@ -80,11 +97,12 @@ func (Bow) Release(releaser Releaser, tx *world.Tx, ctx *UseContext, duration ti
 	create := tx.World().EntityRegistry().Config().Arrow
 	opts := world.EntitySpawnOpts{
 		Position: eyePosition(releaser),
-		Velocity: releaser.Rotation().Vec3().Mul(force * 5),
+		Velocity: releaser.Rotation().Vec3().Mul(force * BowLaunchSpeed),
 		Rotation: releaser.Rotation().Neg(),
 	}
 	projectile := tx.AddEntity(create(opts, world.ArrowSpawnConfig{
-		Damage:              damage,
+		Damage:              1,
+		PowerLevel:          powerLevel,
 		Owner:               releaser,
 		Critical:            force >= 1,
 		ObtainArrowOnPickup: !creative && consume,

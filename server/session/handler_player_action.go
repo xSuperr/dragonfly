@@ -59,5 +59,8 @@ func handlePlayerAction(action int32, face int32, pos protocol.BlockPos, entityR
 	default:
 		return fmt.Errorf("unhandled ActionType %v", action)
 	}
+	// Player actions interrupt duration-based item use. Releasing an item is
+	// handled by ReleaseItemTransaction; these actions must only cancel it.
+	c.StopUsingItem()
 	return nil
 }

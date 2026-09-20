@@ -25,6 +25,9 @@ type Context struct {
 	cancel bool
 }
 
+// MaxEnchantingTablePower is the maximum power an enchanting table can use.
+const MaxEnchantingTablePower = 15
+
 // newTx returns a fresh transaction on World w.
 func newTx(w *World) *Tx {
 	return &Tx{w: w}
@@ -42,6 +45,30 @@ func (ctx *Context) Cancelled() bool { return ctx.cancel }
 // Cancel cancels the Context. It is used by event handlers to signal that the
 // default behaviour of the event should not run.
 func (ctx *Context) Cancel() { ctx.cancel = true }
+
+// SetEnchantingTablePower overrides the bookshelf power used by enchanting
+// tables in the world. A value of zero restores normal bookshelf detection.
+func (w *World) SetEnchantingTablePower(power int) {
+	if w == nil {
+		return
+	}
+	if power < 0 {
+		power = 0
+	}
+	if power > MaxEnchantingTablePower {
+		power = MaxEnchantingTablePower
+	}
+	w.enchantingTablePower.Store(int32(power))
+}
+
+// EnchantingTablePower returns the configured enchanting table power override,
+// or zero when tables should use their nearby bookshelves.
+func (w *World) EnchantingTablePower() int {
+	if w == nil {
+		return 0
+	}
+	return int(w.enchantingTablePower.Load())
+}
 
 // Defer schedules f to run on the owner after the current callback completes
 // and before the parent Task completes. Deferred callbacks run FIFO in
@@ -407,11 +434,21 @@ type normalTransaction struct {
 // Run creates a *Tx, calls ntx.f, closes the transaction and finally closes
 // ntx.c.
 func (ntx normalTransaction) Run(w *World) {
+	completed := false
+	defer func() {
+		if r := recover(); r != nil {
+			w.recordOwnerPanic("normal", r)
+			if !completed {
+				close(ntx.c)
+			}
+		}
+	}()
 	tx := newTx(w)
 	ntx.f(tx)
 	tx.close()
 	tx.runDeferred()
 	close(ntx.c)
+	completed = true
 }
 
 // weakTransaction is a transaction that may be cancelled by its validity
@@ -427,6 +464,19 @@ type weakTransaction struct {
 // *Tx if so. Afterwards, a bool indicating if the transaction was run is added
 // to wtx.c. Finally, wtx.cond.Broadcast() is called.
 func (wtx weakTransaction) Run(w *World) {
+	completed := false
+	sent := false
+	defer func() {
+		if r := recover(); r != nil {
+			w.recordOwnerPanic("weak", r)
+			if !completed && !sent {
+				wtx.cond.L.Lock()
+				wtx.c <- false
+				wtx.cond.Broadcast()
+				wtx.cond.L.Unlock()
+			}
+		}
+	}()
 	valid := wtx.valid == nil || wtx.valid()
 	if valid {
 		tx := newTx(w)
@@ -438,10 +488,11 @@ func (wtx weakTransaction) Run(w *World) {
 	// has been called before we call cond.Broadcast(). If not, we might
 	// broadcast before cond.Wait() and cause a permanent suspension.
 	wtx.cond.L.Lock()
-	defer wtx.cond.L.Unlock()
-
 	wtx.c <- valid
+	sent = true
 	wtx.cond.Broadcast()
+	completed = true
+	wtx.cond.L.Unlock()
 }
 
 // fail delivers false to a weak transaction that will never run, using the

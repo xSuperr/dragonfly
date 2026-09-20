@@ -162,6 +162,11 @@ func (conf Config) New() *World {
 		ra:               conf.Dim.Range(),
 		set:              s,
 	}
+	w.heartbeatName.Store(s.Name)
+	w.heartbeatCurrentTick.Store(s.CurrentTick)
+	w.heartbeatCompletedTick.Store(s.CurrentTick)
+	w.heartbeatLastCompleted.Store(time.Now().UnixNano())
+	w.heartbeatPhase.Store(uint32(TickPhaseIdle))
 	w.chunkWorkers = newChunkWorkerPool(w)
 	w.weather = weather{w: w}
 	var h Handler = NopHandler{}

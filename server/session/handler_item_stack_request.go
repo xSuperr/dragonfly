@@ -45,6 +45,9 @@ type changeInfo struct {
 // Handle ...
 func (h *ItemStackRequestHandler) Handle(p packet.Packet, s *Session, tx *world.Tx, c Controllable) error {
 	pk := p.(*packet.ItemStackRequest)
+	// Inventory transactions interrupt duration-based item use before any
+	// predicted slot changes are applied.
+	c.StopUsingItem()
 	h.current = time.Now()
 
 	s.inTransaction.Store(true)
@@ -231,6 +234,10 @@ func (h *ItemStackRequestHandler) handleDestroy(a *protocol.DestroyStackRequestA
 		return fmt.Errorf("client attempted to destroy %v items, but only %v present", a.Count, i.Count())
 	}
 
+	inv, _ := s.invByID(int32(a.Source.Container.ContainerID), tx)
+	if err := call(event.C(inventory.Holder(c)), int(a.Source.Slot), i.Grow(int(a.Count)-i.Count()), inv.Handler().HandleDrop); err != nil {
+		return err
+	}
 	h.setItemInSlot(a.Source, i.Grow(-int(a.Count)), s, tx)
 	return nil
 }

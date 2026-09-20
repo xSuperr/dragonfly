@@ -45,6 +45,7 @@ func (h *InventoryTransactionHandler) Handle(p packet.Packet, s *Session, tx *wo
 
 	switch data := pk.TransactionData.(type) {
 	case *protocol.NormalTransactionData:
+		c.StopUsingItem()
 		h.resendInventories(s)
 		// Always resend inventories with normal transactions. Most of the time we do not use these
 		// transactions, so we're best off making sure the client and server stay in sync.
@@ -53,6 +54,7 @@ func (h *InventoryTransactionHandler) Handle(p packet.Packet, s *Session, tx *wo
 		}
 		return
 	case *protocol.MismatchTransactionData:
+		c.StopUsingItem()
 		// Just resend the inventory and don't do anything.
 		h.resendInventories(s)
 		return
@@ -191,6 +193,7 @@ func (h *InventoryTransactionHandler) handleUseItemTransaction(data *protocol.Us
 
 	switch data.ActionType {
 	case protocol.UseItemActionBreakBlock:
+		c.StopUsingItem()
 		c.BreakBlock(pos)
 	case protocol.UseItemActionClickBlock:
 		c.UseItemOnBlock(pos, cube.Face(data.BlockFace), vec32To64(data.ClickedPosition))

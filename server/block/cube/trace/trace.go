@@ -8,8 +8,12 @@ import (
 
 // TraverseBlocks performs a ray trace between the start and end coordinates.
 // A function 'f' is passed which is called for each voxel, if f returns false, the function will return.
-// TraverseBlocks panics if the start and end positions are the same.
+// TraverseBlocks panics if the start and end positions are the same. Non-finite
+// coordinates are rejected without invoking f.
 func TraverseBlocks(start, end mgl64.Vec3, f func(pos cube.Pos) (con bool)) {
+	if !finiteVec3(start) || !finiteVec3(end) {
+		return
+	}
 	dir := end.Sub(start)
 	if mgl64.FloatEqual(dir.LenSqr(), 0) {
 		panic("start and end points are the same, giving a zero direction vector")
@@ -51,6 +55,15 @@ func TraverseBlocks(start, end mgl64.Vec3, f func(pos cube.Pos) (con bool)) {
 			max[2] += delta[2]
 		}
 	}
+}
+
+func finiteVec3(v mgl64.Vec3) bool {
+	for _, component := range v {
+		if math.IsNaN(component) || math.IsInf(component, 0) {
+			return false
+		}
+	}
+	return true
 }
 
 // safeDivideVec3 ...
